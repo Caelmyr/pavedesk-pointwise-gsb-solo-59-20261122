@@ -15,6 +15,9 @@ MIN_MARK_PIXELS = 20
 REGION_OUTLINE = (199, 212, 151)
 EXCLUDED_OUTLINE = (237, 122, 110)
 MASK_THROUGH = (102, 180, 147, 94)
+EDGE_LIMIT = "Survey edge"
+SUPPORT_LIMIT = "Unphotographed area"
+MAX_CLEARANCE_STATIONS = 400
 
 
 def path_points(payload):
@@ -100,6 +103,112 @@ def sample_support_along(available, frame, points, closed=False):
     return pieces
 
 
+def obstacle_label_image(tile, frame):
+    """Label blocked plane pixels: 0 is free, 1..N are named exclusions or unsupported area."""
+    labels = np.zeros((frame.extent[1], frame.extent[0]), dtype=np.int32)
+    names = []
+    for region in tile["regions"]:
+        if region["purpose"] != "ignore":
+            continue
+        mask = polygon_mask(frame.extent, region["vertices"])
+        if not mask.any():
+            continue
+        names.append(region["name"])
+        labels[mask] = len(names)
+    unsupported = ~frame.valid & (labels == 0)
+    if unsupported.any():
+        names.append(SUPPORT_LIMIT)
+        labels[unsupported] = len(names)
+    return labels, names
+
+
+def clearance_ray(labels, x, y, dx, dy, physical_per_pixel):
+    """Walk a unit pixel ray until a blocked label or the plane edge; return distance and label."""
+    height, width = labels.shape
+    limit = int(math.ceil(math.hypot(width, height))) + 2
+    cx, cy = x, y
+    for step in range(1, limit):
+        cx += dx
+        cy += dy
+        col = int(round(cx))
+        row = int(round(cy))
+        if not 0 <= col < width or not 0 <= row < height:
+            return step * physical_per_pixel, 0
+        if labels[row, col]:
+            return step * physical_per_pixel, int(labels[row, col])
+    return limit * physical_per_pixel, 0
+
+
+def clearance_profile(frame, tile, points):
+    """Perpendicular room on both sides of a traced path, with the obstacle met on each side."""
+    factors, units = calibrated_dimensions(frame)
+    scale = frame.scale if frame.scale is not None else (1.0, 1.0)
+    labels, names = obstacle_label_image(tile, frame)
+    physical = np.asarray(points, dtype=np.float64) * factors
+    vectors = np.diff(physical, axis=0)
+    lengths = np.linalg.norm(vectors, axis=1)
+    total = float(np.sum(lengths))
+    if total <= 0:
+        return None, None
+    spacing = 100.0 if units == "mm" else total / 200
+    spacing = max(spacing, total / MAX_CLEARANCE_STATIONS)
+    marks = [index * spacing for index in range(int(math.floor(total / spacing)) + 1)]
+    if total - marks[-1] > 1e-6:
+        marks.append(total)
+    stations = []
+    tightest = None
+    seg_index = 0
+    seg_start = 0.0
+    for mark in marks:
+        while seg_index < len(lengths) - 1 and seg_start + lengths[seg_index] < mark:
+            seg_start += lengths[seg_index]
+            seg_index += 1
+        ratio = 0.0 if lengths[seg_index] == 0 else (mark - seg_start) / lengths[seg_index]
+        pos = physical[seg_index] + ratio * vectors[seg_index]
+        direction = vectors[seg_index] / lengths[seg_index]
+        px = pos[0] / scale[0] - 0.5
+        py = pos[1] / scale[1] - 0.5
+        left_x = direction[1] / scale[0]
+        left_y = -direction[0] / scale[1]
+        norm = math.hypot(left_x, left_y) or 1.0
+        left_x, left_y = left_x / norm, left_y / norm
+        per_pixel = math.hypot(left_x * scale[0], left_y * scale[1])
+        left, left_label = clearance_ray(labels, px, py, left_x, left_y, per_pixel)
+        right, right_label = clearance_ray(labels, px, py, -left_x, -left_y, per_pixel)
+        station = {
+            "along": round(mark, 1),
+            "left": round(left, 1),
+            "left_limit": names[left_label - 1] if left_label else EDGE_LIMIT,
+            "right": round(right, 1),
+            "right_limit": names[right_label - 1] if right_label else EDGE_LIMIT,
+        }
+        stations.append(station)
+        if tightest is None or left + right < tightest[0]["left"] + tightest[0]["right"]:
+            tightest = (station, (px, py), (left_x, left_y), per_pixel)
+    narrow, (px, py), (left_x, left_y), per_pixel = tightest
+    pinch = {
+        "at": [(px + 0.5) / frame.extent[0], (py + 0.5) / frame.extent[1]],
+        "bar": [
+            [(px + left_x * narrow["left"] / per_pixel + 0.5) / frame.extent[0],
+             (py + left_y * narrow["left"] / per_pixel + 0.5) / frame.extent[1]],
+            [(px - left_x * narrow["right"] / per_pixel + 0.5) / frame.extent[0],
+             (py - left_y * narrow["right"] / per_pixel + 0.5) / frame.extent[1]],
+        ],
+        "label": f"Tightest {narrow['left'] + narrow['right']:.0f} {units}",
+    }
+    min_left = min(stations, key=lambda item: item["left"])
+    min_right = min(stations, key=lambda item: item["right"])
+    profile = {
+        "units": units,
+        "station_spacing": round(spacing, 1),
+        "stations": stations,
+        "tightest": {**narrow, "width": round(narrow["left"] + narrow["right"], 1)},
+        "min_left": {"along": min_left["along"], "value": min_left["left"], "limit": min_left["left_limit"]},
+        "min_right": {"along": min_right["along"], "value": min_right["right"], "limit": min_right["right_limit"]},
+    }
+    return profile, pinch
+
+
 def region_outline_bounds(vertices, totals):
     values = np.asarray(vertices, dtype=np.float64)
     xy = values * totals
@@ -178,7 +287,7 @@ def mask_geometry(frame, selected, requested, supported):
     }
 
 
-def geometry_painter(frame, points, segments, closed=False, support=None, centroid=None):
+def geometry_painter(frame, points, segments, closed=False, support=None, centroid=None, regions=None, pinch=None):
     image = base_rgba(frame)
     width, height = image.size
     pixels = curve_points(points, image.size)
@@ -188,6 +297,15 @@ def geometry_painter(frame, points, segments, closed=False, support=None, centro
         from PIL import Image
         image = Image.fromarray(raw.astype(np.uint8))
     draw = ImageDraw.Draw(image)
+    if regions:
+        region_stroke = max(1, round(min(width, height) / 360))
+        for region in regions:
+            color = EXCLUDED_OUTLINE if region["purpose"] == "ignore" else MASK_THROUGH[:3]
+            outline = curve_points(region["vertices"], image.size)
+            draw.line([*outline, outline[0]], width=region_stroke + 2, fill=SHADOW, joint="curve")
+            draw.line([*outline, outline[0]], width=region_stroke, fill=color, joint="curve")
+            x, y = outline[0]
+            draw.text((x + 5, y + 4), region["name"][:36], fill=color, stroke_width=2, stroke_fill=SHADOW)
     edges = [*pixels, pixels[0]] if closed else pixels
     stroke = max(1, round(min(width, height) / 310))
     draw.line(edges, fill=SHADOW, width=stroke + 3, joint="curve")
@@ -205,10 +323,21 @@ def geometry_painter(frame, points, segments, closed=False, support=None, centro
         x, y = curve_points([centroid], image.size)[0]
         draw.line((x - 6, y, x + 6, y), fill=EXCLUDED_OUTLINE, width=2)
         draw.line((x, y - 6, x, y + 6), fill=EXCLUDED_OUTLINE, width=2)
+    if pinch is not None:
+        bar = curve_points(pinch["bar"], image.size)
+        draw.line(bar, fill=SHADOW, width=stroke + 5)
+        draw.line(bar, fill=EXCLUDED_OUTLINE, width=stroke + 2)
+        for bx, by in bar:
+            draw.ellipse((bx - 4, by - 4, bx + 4, by + 4), fill=EXCLUDED_OUTLINE, outline=SHADOW, width=1)
+        x, y = curve_points([pinch["at"]], image.size)[0]
+        draw.ellipse((x - 5, y - 5, x + 5, y + 5), outline=EXCLUDED_OUTLINE, width=2)
+        mid_x = (bar[0][0] + bar[1][0]) / 2
+        mid_y = (bar[0][1] + bar[1][1]) / 2
+        draw.text((mid_x + 8, mid_y + 8), pinch["label"], fill=INK, stroke_width=2, stroke_fill=SHADOW)
     return image
 
 
-def trace_geometry(frame, available, points):
+def trace_geometry(frame, available, points, tile=None):
     segments, units = path_segments(frame, points)
     cumulative = path_cumulative(segments)
     pieces = sample_support_along(available, frame, points)
@@ -224,7 +353,14 @@ def trace_geometry(frame, available, points):
         "overall_support": round(100 * present / samples, 3),
         "length_unit": units,
     }
-    return detail, geometry_painter(frame, points, segments)
+    regions = None
+    pinch = None
+    if tile is not None:
+        clearance, pinch = clearance_profile(frame, tile, points)
+        if clearance is not None:
+            detail["clearance"] = clearance
+        regions = tile["regions"]
+    return detail, geometry_painter(frame, points, segments, regions=regions, pinch=pinch)
 
 
 def polygon_geometry(tile, frame, selection, available):
@@ -256,7 +392,7 @@ def create_metrology(store, specimen_id, payload):
     available = region_domain(frame.extent, tile) & frame.valid
     if mode == "trace":
         points = path_points(data.get("points"))
-        shape, overlay = trace_geometry(frame, available, points)
+        shape, overlay = trace_geometry(frame, available, points, tile)
         region = None
     else:
         region = active_region(tile, identity(data.get("region_id"), "Region ID"))

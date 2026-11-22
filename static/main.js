@@ -178,10 +178,23 @@ function geometryPage() {
       ? [["Trace length",`${n(metrics.trace_length)} ${metrics.length_unit}`],["Supported stations",percent(metrics.overall_support)]]
       : [["Marked area",`${n(metrics.vector_outline_area)} ${metrics.units}`],["Visible area",`${n(metrics.raster_supported_area)} ${metrics.units}`],["Outline",`${n(metrics.outline_length)} ${metrics.outline_unit}`]];
     const stations=record.mode==="trace"?metrics.segments:metrics.outline_segments;
+    let clearance="";
+    if (record.mode==="trace"&&metrics.clearance) {
+      const c=metrics.clearance;
+      stats.push(["Tightest width",`${n(c.tightest.width)} ${c.units}`],
+        ["Tightest point at",`${n(c.tightest.along)} ${c.units}`],
+        ["Min left margin",`${n(c.min_left.value)} ${c.units}`],
+        ["Min right margin",`${n(c.min_right.value)} ${c.units}`]);
+      clearance=`<h3>Side clearance along the route</h3>
+        <p class="soft">Perpendicular room to marked exclusions and the survey edge, sampled every ${n(c.station_spacing)} ${c.units} along the traced line.</p>
+        ${table(["Along",`Left (${c.units})`,"Left limit",`Right (${c.units})`,"Right limit"],
+          c.stations.map(item=>[item.along,item.left,item.left_limit,item.right,item.right_limit]))}`;
+    }
     report=`<section class="card stack"><h3>${e(record.title)}</h3>
       <figure class="stage">${img(base+"/overlay.png",record.title)}</figure>
       <div class="metrics">${stats.map(([name,value])=>stat(name,value)).join("")}</div>
       ${table(["Segment","Length","Heading"],stations.map(item=>[item.index,`${n(item.length)} ${item.units}`,n(item.clockwise_heading)+"°"]))}
+      ${clearance}
       <div class="actions">${link("Measurement JSON",base+"/data.json","secondary","download")}</div></section>`;
   }
   return `<div class="grid-detail">${report}<div class="stack"><section class="card"><h3>Measure a visible shape</h3>
