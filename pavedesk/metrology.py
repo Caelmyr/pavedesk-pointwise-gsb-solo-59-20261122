@@ -1,13 +1,14 @@
 import math
 
 import numpy as np
-from PIL import ImageDraw
+from PIL import Image, ImageDraw
 from scipy import ndimage
 
 from .analysis import capture_provenance, specimen_provenance
 from .art import ACCENT, INK, SHADOW, base_rgba, curve_points, stored_preview
 from .geometry import active_region, polygon_mask, region_domain, signed_area, specimen_frame, validate_polygon
 from .model import InputError, collection, dictionary, enumeration, identity, numeric_pair, string
+from .route import route_frame, source_palette
 
 
 MIN_SEGMENT = 2.0
@@ -15,6 +16,8 @@ MIN_MARK_PIXELS = 20
 REGION_OUTLINE = (199, 212, 151)
 EXCLUDED_OUTLINE = (237, 122, 110)
 MASK_THROUGH = (102, 180, 147, 94)
+UNPHOTOGRAPHED = (236, 112, 104)
+MAX_TRACE_SAMPLES = 12_000
 
 
 def path_points(payload):
@@ -227,6 +230,211 @@ def trace_geometry(frame, available, points):
     return detail, geometry_painter(frame, points, segments)
 
 
+def sample_route_source(frame, points, sample_limit=MAX_TRACE_SAMPLES):
+    """Walk the traced polyline and record the original frame behind each sample."""
+    source_map = frame.source_map
+    height, width = source_map.shape
+    xy = np.asarray(points, dtype=np.float32) * frame.extent - 0.5
+    pieces = []
+    for index, (start, stop) in enumerate(zip(xy, xy[1:]), 1):
+        length = float(np.linalg.norm(stop - start))
+        count = min(sample_limit, max(2, int(np.ceil(length)) + 1))
+        samples = np.linspace(start, stop, count)
+        row = np.clip(samples[:, 1], 0, height - 1)
+        col = np.clip(samples[:, 0], 0, width - 1)
+        codes = ndimage.map_coordinates(source_map, (row, col), order=0, mode="nearest")
+        fractions = np.linspace(0.0, 1.0, count)
+        pieces.append({"index": index, "count": count, "fractions": fractions, "codes": codes.astype(np.int16)})
+    return pieces
+
+
+def runs_of_constant(values):
+    """Contiguous [start, stop) runs of equal integer values."""
+    edges = np.flatnonzero(np.diff(values)) + 1
+    starts = np.r_[0, edges]
+    stops = np.r_[edges, len(values)]
+    return [(int(start), int(stop), int(values[start])) for start, stop in zip(starts, stops)]
+
+
+def route_provenance(frame, points):
+    join = frame.join
+    entries = {entry["index"]: entry for entry in join["photos"]}
+    pieces = sample_route_source(frame, points)
+    segment_rows = []
+    gaps = []
+    totals = {}
+    lengths = {}
+    uncovered = 0.0
+    for piece in pieces:
+        index = piece["index"] - 1
+        vector = np.asarray(points[index + 1], dtype=np.float64) - np.asarray(points[index], dtype=np.float64)
+        factors = np.asarray(frame.extent, dtype=np.float64) * (
+            np.asarray(frame.scale, dtype=np.float64) if frame.scale else np.ones(2)
+        )
+        physical = float(np.linalg.norm(vector * factors))
+        runs = []
+        for start, stop, code in runs_of_constant(piece["codes"]):
+            entry = entries.get(code)
+            length = physical * float(piece["fractions"][stop - 1] - piece["fractions"][start])
+            run = {
+                "from_fraction": round(float(piece["fractions"][start]), 6),
+                "to_fraction": round(float(piece["fractions"][stop - 1]), 6),
+                "source_code": entry["code"] if entry else None,
+                "photo_id": entry["photo_id"] if entry else None,
+                "photo_name": entry["name"] if entry else "Not photographed",
+                "samples": int(stop - start),
+                "length": round(length, 5),
+            }
+            runs.append(run)
+            if entry:
+                totals[entry["code"]] = totals.get(entry["code"], 0) + int(stop - start)
+                lengths[entry["code"]] = lengths.get(entry["code"], 0.0) + length
+            else:
+                gaps.append({"segment": piece["index"], **run})
+                uncovered += length
+        segment_rows.append({"index": piece["index"], "samples": int(piece["count"]), "runs": runs})
+    summary = []
+    for entry in join["photos"]:
+        if totals.get(entry["code"], 0):
+            summary.append({
+                "source_code": entry["code"],
+                "photo_id": entry["photo_id"],
+                "photo_name": entry["name"],
+                "samples": totals[entry["code"]],
+                "trace_length": round(lengths.get(entry["code"], 0.0), 5),
+            })
+    if gaps:
+        summary.append({
+            "source_code": None,
+            "photo_id": None,
+            "photo_name": "Not photographed",
+            "samples": sum(item["samples"] for item in gaps),
+            "trace_length": round(uncovered, 5),
+        })
+    samples = sum(piece["count"] for piece in pieces)
+    gap_samples = sum(item["samples"] for item in gaps)
+    return {
+        "join_id": join["id"],
+        "join_name": join["name"],
+        "join_source_version": join["source_version"],
+        "plane_corners": join["plane_corners"],
+        "canvas": join["canvas"],
+        "source_map_digest": join["source_map_digest"],
+        "photos": [
+            {"code": entry["code"], "photo_id": entry["photo_id"], "name": entry["name"], "role": entry["role"]}
+            for entry in join["photos"]
+        ],
+        "segments": segment_rows,
+        "sources": summary,
+        "gaps": gaps,
+        "gap_samples": gap_samples,
+        "coverage_percent": round(100 * (samples - gap_samples) / max(samples, 1), 3),
+        "overlap_supplier": join["overlap"]["supplier_code"],
+        "note": (
+            "Every trace sample is read from the frame recorded in the joined route source map. "
+            "Unphotographed stretches have no original frame and are reported as gaps."
+        ),
+    }
+
+
+def trace_source_at(record, position):
+    """Frame behind an arbitrary point on a saved route trace.
+
+    The point is projected onto the traced polyline; the contiguous source run
+    that contains the projection answers the frame, or reports a gap.
+    """
+    shape = record.get("shape") or {}
+    provenance = shape.get("provenance")
+    if not provenance:
+        raise InputError("This geometry record was not traced on a joined route.")
+    points = np.asarray(shape["points"], dtype=np.float64)
+    query = np.asarray(position, dtype=np.float64)
+    best = None
+    for index in range(len(points) - 1):
+        start, stop = points[index], points[index + 1]
+        delta = stop - start
+        span = float(np.dot(delta, delta))
+        fraction = 0.0 if span <= 0 else float(np.clip(np.dot(query - start, delta) / span, 0.0, 1.0))
+        closest = start + fraction * delta
+        distance = float(np.linalg.norm((query - closest) * provenance["canvas"]))
+        if best is None or distance < best[0]:
+            best = (distance, index, fraction, closest)
+    distance, index, fraction, closest = best
+    piece = provenance["segments"][index]
+    run = next(
+        (item for item in piece["runs"] if item["from_fraction"] - 1e-9 <= fraction <= item["to_fraction"] + 1e-9),
+        piece["runs"][-1],
+    )
+    return {
+        "query": [round(float(value), 6) for value in query],
+        "nearest_trace_point": [round(float(value), 6) for value in closest],
+        "distance_px": round(distance, 3),
+        "segment": piece["index"],
+        "segment_fraction": round(fraction, 6),
+        "source_code": run["source_code"],
+        "photo_id": run["photo_id"],
+        "photo_name": run["photo_name"],
+        "photographed": run["source_code"] is not None,
+        "join_id": provenance["join_id"],
+        "join_name": provenance["join_name"],
+    }
+
+
+def route_overlay(frame, points, provenance, colors):
+    image = base_rgba(frame)
+    width, height = image.size
+    pixels = curve_points(points, image.size)
+    draw = ImageDraw.Draw(image)
+    stroke = max(1, round(min(width, height) / 310))
+    for piece in provenance["segments"]:
+        index = piece["index"] - 1
+        start_point = np.asarray(points[index], dtype=np.float64)
+        end_point = np.asarray(points[index + 1], dtype=np.float64)
+        for run in piece["runs"]:
+            a = start_point + (end_point - start_point) * run["from_fraction"]
+            b = start_point + (end_point - start_point) * run["to_fraction"]
+            ends = curve_points([tuple(a), tuple(b)], image.size)
+            draw.line(ends, fill=SHADOW, width=stroke + 4)
+            if run["source_code"] is None:
+                draw.line(ends, fill=UNPHOTOGRAPHED, width=stroke + 2)
+            else:
+                draw.line(ends, fill=colors.get(run["source_code"], (255, 255, 255)), width=stroke + 2)
+    for index, (x, y) in enumerate(pixels, 1):
+        draw.ellipse((x - 4, y - 4, x + 4, y + 4), fill=INK, outline=SHADOW, width=1)
+        draw.text((x + 6, y + 3), str(index), fill=INK, stroke_width=2, stroke_fill=SHADOW)
+    return image
+
+
+def trace_route_geometry(store, join, points):
+    frame = route_frame(store, join)
+    available = frame.valid
+    segments, units = path_segments(frame, points)
+    cumulative = path_cumulative(segments)
+    provenance = route_provenance(frame, points)
+    pieces = sample_support_along(available, frame, points)
+    samples = sum(item["samples"] for item in pieces)
+    present = sum(item["supported_samples"] for item in pieces)
+    colors = {
+        entry["code"]: source_palette(
+            next(row["index"] for row in join["photos"] if row["code"] == entry["code"])
+        )
+        for entry in provenance["photos"]
+    }
+    detail = {
+        "points": points,
+        "segments": segments,
+        "trace_length": cumulative[-1],
+        "cumulative": cumulative,
+        "turn_angles": path_turns(segments),
+        "support_along_line": pieces,
+        "overall_support": round(100 * present / samples, 3),
+        "length_unit": units,
+        "provenance": provenance,
+    }
+    overlay = route_overlay(frame, points, provenance, colors)
+    return detail, overlay, frame
+
+
 def polygon_geometry(tile, frame, selection, available):
     vertices = validate_polygon(selection["vertices"])
     requested = polygon_mask(frame.extent, vertices)
@@ -252,6 +460,43 @@ def create_metrology(store, specimen_id, payload):
     title = string(data.get("title"), "Measurement title", maximum=90)
     mode = enumeration(data.get("mode"), ("trace", "area"), "Geometry measurement")
     tile = store.tile(specimen_id)
+    join_id = identity(data["join_id"], "Joined route ID") if data.get("join_id") else None
+    if join_id is not None:
+        if mode != "trace":
+            raise InputError("Area measurement uses the specimen plane, not a joined route.")
+        join = store.join(join_id)
+        if join["tile_id"] != tile["id"]:
+            raise InputError("The joined route belongs to another specimen.")
+        points = path_points(data.get("points"))
+        shape, overlay, frame = trace_route_geometry(store, join, points)
+        return store.save_metrology({
+            "title": title,
+            "mode": "trace",
+            "tile_id": tile["id"],
+            "specimen": specimen_provenance(tile),
+            "source": {
+                "id": join["id"],
+                "display_name": join["name"],
+                "role": "route-join",
+                "plane_to_capture": None,
+                "canvas": join["canvas"],
+                "plane_size": join["plane_size"],
+                "source_map_digest": join["source_map_digest"],
+                "synthetic": False,
+                "kind": "route-join",
+            },
+            "join": {
+                "id": join["id"],
+                "name": join["name"],
+                "source_version": join["source_version"],
+                "photos": shape["provenance"]["photos"],
+                "overlap_supplier": shape["provenance"]["overlap_supplier"],
+            },
+            "region": None,
+            "exclusions": [],
+            "shape": shape,
+            "image": stored_preview(overlay, store.blobs),
+        })
     frame = specimen_frame(store.blobs, tile)
     available = region_domain(frame.extent, tile) & frame.valid
     if mode == "trace":
@@ -267,6 +512,7 @@ def create_metrology(store, specimen_id, payload):
         "tile_id": tile["id"],
         "specimen": specimen_provenance(tile),
         "source": capture_provenance(frame),
+        "join": None,
         "region": region,
         "exclusions": [candidate for candidate in tile["regions"] if candidate["purpose"] == "ignore"],
         "shape": shape,

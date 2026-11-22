@@ -13,6 +13,7 @@ from .evidence import (
     create_evidence,
     evidence_zip,
     filename_stem,
+    metrology_provenance_table,
     result_metrics_table,
     specimen_html,
     study_table,
@@ -22,7 +23,8 @@ from .evidence import (
 from .inspection import side_preview, viewing_pair
 from .art import base_rgba
 from .intake import MAX_ARCHIVE_BYTES, inspect_packet
-from .metrology import create_metrology
+from .metrology import create_metrology, trace_source_at
+from .route import create_join, load_source_map, point_source, summarize_join
 from .model import (
     ANALYSIS_LABELS,
     MAX_UPLOAD,
@@ -416,6 +418,51 @@ def register_desks(api, store, heavy):
             record = create_metrology(store, specimen_id, json_request())
         return jsonify(record), 201
 
+    @api.get("/specimens/<specimen_id>/joins")
+    def join_records(specimen_id):
+        return jsonify({"items": [summarize_join(join) for join in store.list_joins(specimen_id)]})
+
+    @api.post("/specimens/<specimen_id>/joins")
+    def join_make(specimen_id):
+        with heavy:
+            record = create_join(store, specimen_id, json_request())
+        return jsonify(summarize_join(record)), 201
+
+    @api.get("/joins/<join_id>")
+    def join_show(join_id):
+        return jsonify(summarize_join(store.join(join_id)))
+
+    @api.get("/joins/<join_id>/image.png")
+    def join_image(join_id):
+        return png_blob(store, store.join(join_id)["image_digest"])
+
+    @api.get("/joins/<join_id>/provenance.png")
+    def join_provenance(join_id):
+        return png_blob(store, store.join(join_id)["provenance_digest"])
+
+    @api.get("/joins/<join_id>/source-map.png")
+    def join_source_map(join_id):
+        return png_blob(store, store.join(join_id)["source_map_digest"])
+
+    @api.get("/joins/<join_id>/data.json")
+    def join_document(join_id):
+        record = store.join(join_id)
+        name = filename_stem(record["name"], "joined-route")
+        return binary_response(artifact_json(record), "application/json", name + ".json")
+
+    @api.get("/joins/<join_id>/source-at")
+    def join_source_at(join_id):
+        record = store.join(join_id)
+        try:
+            x = float(request.args.get("x", ""))
+            y = float(request.args.get("y", ""))
+        except ValueError as error:
+            raise InputError("Give x and y as normalized coordinates between 0 and 1.") from error
+        if not (0 <= x <= 1 and 0 <= y <= 1):
+            raise InputError("Give x and y as normalized coordinates between 0 and 1.")
+        source_map = load_source_map(store, record)
+        return jsonify(point_source(record, source_map, (x, y)))
+
     @api.get("/metrology/<entry_id>/overlay.png")
     def geometry_artifact(entry_id):
         return png_blob(store, store.metrology(entry_id)["image"])
@@ -425,6 +472,24 @@ def register_desks(api, store, heavy):
         record = store.metrology(entry_id)
         name = filename_stem(record["title"], "geometry")
         return binary_response(artifact_json(record), "application/json", name + ".json")
+
+    @api.get("/metrology/<entry_id>/provenance.csv")
+    def geometry_provenance(entry_id):
+        record = store.metrology(entry_id)
+        name = filename_stem(record["title"], "geometry")
+        return binary_response(metrology_provenance_table(record), "text/csv", name + "-sources.csv")
+
+    @api.get("/metrology/<entry_id>/source-at")
+    def geometry_source_at(entry_id):
+        record = store.metrology(entry_id)
+        try:
+            x = float(request.args.get("x", ""))
+            y = float(request.args.get("y", ""))
+        except ValueError as error:
+            raise InputError("Give x and y as normalized coordinates between 0 and 1.") from error
+        if not (0 <= x <= 1 and 0 <= y <= 1):
+            raise InputError("Give x and y as normalized coordinates between 0 and 1.")
+        return jsonify(trace_source_at(record, (x, y)))
 
 
 def register_training(api, store, heavy):

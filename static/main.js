@@ -1,7 +1,7 @@
 import {q,qa,icon,e,btn,link,badge,empty,option,img,field,textField,selectField,numField,checkField,areaField,api,request,date,n,percent,plot,stat,table} from "./widgets.js";
 import {resultCard,specimenResultRows} from "./results.js";
 
-const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:""};
+const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:"",joins:[],join:null};
 const dialog=q("#dialog");
 const nav=[
   ["collection","Specimens","tiles"],
@@ -166,28 +166,110 @@ function evidencePage() {
     <section class="card"><h3>Specimen activity</h3><div class="divider-list scroll-list">${(state.activity||[]).map(row=>`<div class="row"><div class="grow"><strong>${e(row.message)}</strong><br><small>${e(date(row.recorded_at))}</small></div></div>`).join("")}</div></section></div>`;
 }
 
+function joinRow(item) {
+  return `<div class="row"><div class="grow"><strong class="row-title">${e(item.name)}</strong>
+    <small>${item.sections.map(section=>`${e(section.code)} ${percent(section.percent)}`).join(" · ")} · overlap ${percent(item.overlap.percent_of_route)}${item.overlap.single_source?" from "+e(item.overlap.supplier_code):" split"}</small></div>
+    ${btn("Open route","join-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`;
+}
+
+function joinCard() {
+  const join=state.join;
+  const joins=state.joins||[];
+  let report=empty("Join two overlapping captures to trace one route across both frames.",btn("Join captures","join-add","primary","compare"));
+  if (join) {
+    const source=join.sections.map(section=>`<div class="row"><span class="dot" style="background:${join.palette.find(item=>item.code===section.code)?.color||"#888"}"></span><div class="grow"><strong class="row-title">${e(section.code)} · ${e(section.name)}</strong><small>${percent(section.percent)} of joined pixels</small></div></div>`).join("");
+    const sacrificed=join.decision.sacrificed.map(item=>`<li><strong>${e(item.feature)}</strong> is clearer in ${e(item.better_code)} (${e(item.better_name)}); the joined image keeps ${e(item.chosen_code)}.</li>`).join("");
+    report=`<section class="card stack"><div class="title-row"><h3>${e(join.name)}</h3>${badge(join.overlap.single_source?"One frame per overlap":"Overlap split","ready")}</div>
+      <figure class="stage">${img(join.image_url,"Joined route image")}</figure>
+      <div class="metrics">${stat("Canvas",join.canvas.join(" × ")+" px")}${stat("Overlap",percent(join.overlap.percent_of_route))}${stat("Not photographed",percent(join.coverage.unphotographed.percent))}</div>
+      <p class="notice">${e(join.decision.reason)}</p>
+      <h4>Frame by pixels</h4><div class="divider-list">${source}</div>
+      <figure class="stage">${img(join.provenance_url,"Pixel provenance map")}</figure>
+      ${sacrificed?`<h4>What the single-frame overlap did not keep</h4><ul>${sacrificed}</ul>`:`<p class="soft">Both labelled features stay with ${e(join.overlap.supplier_code)} in the overlap.</p>`}
+      ${join.coverage.unphotographed.component_count?`<p class="notice">${join.coverage.unphotographed.component_count} unphotographed patch(es), ${percent(join.coverage.unphotographed.percent)} of the canvas, hatched in the joined image.</p>`:""}
+      <div class="actions">${link("Provenance map","/api/joins/"+join.id+"/provenance.png","secondary","download")}${link("Route JSON",join.data_url,"secondary","download")}${btn("Trace route","join-trace","primary","measure")}</div></section>`;
+  }
+  return `<div class="stack">${report}<section class="card"><h3>Joined routes</h3>
+    <p class="soft">Every joined pixel is copied from one original frame; the overlap is never blended.</p>
+    <div class="actions">${btn("Join captures","join-add","secondary","compare")}</div>
+    <div class="divider-list">${joins.map(joinRow).join("")||"<p class='soft'>No joined routes.</p>"}</div></section></div>`;
+}
+
+function joinForm() {
+  const ready=state.tile.photos.filter(item=>item.registered_url);
+  if (ready.length<2) throw Error("Register two captures in the specimen plane first.");
+  const capture=state.tile.photos.find(item=>item.registration_state==="base");
+  if (!capture) throw Error("Set a base capture before joining a route.");
+  modal("Join overlapping captures",`
+    <p class="notice">Choose the two registered captures, head first and tail second. Mark the shared joint as the specimen plane in the base capture, then register the other capture to that same joint.</p>
+    <div class="form-columns">${selectField("Head capture (route start)","head",sources(ready,ready[0].id))}${selectField("Tail capture (route end)","tail",sources(ready,ready[1].id))}</div>
+    ${textField("Route name","name",state.tile.name+" route",'required maxlength="90"')}
+    ${selectField("Overlap source","overlap_source",option("auto","Choose the clearer single frame automatically","auto")+option("head","Head capture supplies the whole overlap")+option("tail","Tail capture supplies the whole overlap"))}
+    <p class="soft">The overlap is never blended. The chosen frame supplies it whole, so a traced crack or worn edge does not change exposure mid-line.</p>`,
+    "Join route",async data=>{
+      const join=await api(tileUrl()+"/joins",{method:"POST",body:{
+        version:state.tile.version,name:data.get("name"),photo_ids:[data.get("head"),data.get("tail")],
+        overlap_source:data.get("overlap_source"),
+      }});
+      state.join=join;
+      state.joins=(await api(tileUrl()+"/joins")).items;
+      commitModal();
+      state.tab="geometry";
+      toast("Route joined. Trace it from the Geometry tab.");
+      render();
+    },true);
+}
+
+function joinTraceForm() {
+  const join=state.join;
+  if (!join) throw Error("Open a joined route first.");
+  modal("Trace on the joined route",textField("Measurement title","title","Route trace",'required maxlength="90"')+
+    `<p class="notice">Click along the feature. Each point is read from the original frame that supplied it, and any part the cameras never covered is reported as a gap.</p>
+     <div class="actions">${btn("Which frame is here?","join-probe","tiny secondary","search")}<span class="soft" id="join-probe-out">Mark or pick a point to check its source frame.</span></div>
+     ${drawing(join.image_url,"Joined route image")}
+     <div class="actions">${btn("Clear points","draw-clear","tiny secondary")}${btn("Undo point","draw-undo","tiny ghost")}<span class="soft" id="draw-count"></span></div>`,
+    "Save trace",async data=>{
+      const record=await api(tileUrl()+"/metrology",{method:"POST",body:{
+        title:data.get("title"),mode:"trace",join_id:join.id,points:drawPoints,
+      }});
+      state.metrologyActive=record;
+      await gatherTile();
+      commitModal();
+      state.tab="geometry";
+      toast("Route trace saved with frame provenance.");
+      render();
+    },true);
+  prepareDrawing([],45);
+}
+
 function geometryPage() {
   const record=state.metrologyActive;
   const results=state.metrology||[];
-  const tile=state.tile;
   let report=empty("Save a traced path or the area of an existing sampling region.");
   if (record) {
     const metrics=record.shape;
     const base=`/api/metrology/${record.id}`;
     const stats=record.mode==="trace"
-      ? [["Trace length",`${n(metrics.trace_length)} ${metrics.length_unit}`],["Supported stations",percent(metrics.overall_support)]]
+      ? [["Trace length",`${n(metrics.trace_length)} ${metrics.length_unit}`],["Gap-free length",percent(metrics.provenance?metrics.provenance.coverage_percent:metrics.overall_support)]]
       : [["Marked area",`${n(metrics.vector_outline_area)} ${metrics.units}`],["Visible area",`${n(metrics.raster_supported_area)} ${metrics.units}`],["Outline",`${n(metrics.outline_length)} ${metrics.outline_unit}`]];
     const stations=record.mode==="trace"?metrics.segments:metrics.outline_segments;
+    const provenance=metrics.provenance;
+    const sourceRows=provenance?provenance.sources.map(item=>[item.source_code||"—",item.photo_name,item.samples,`${n(item.trace_length)} ${metrics.length_unit}`,item.source_code?"covered":"not photographed"]):[];
     report=`<section class="card stack"><h3>${e(record.title)}</h3>
       <figure class="stage">${img(base+"/overlay.png",record.title)}</figure>
       <div class="metrics">${stats.map(([name,value])=>stat(name,value)).join("")}</div>
-      ${table(["Segment","Length","Heading"],stations.map(item=>[item.index,`${n(item.length)} ${item.units}`,n(item.clockwise_heading)+"°"]))}
-      <div class="actions">${link("Measurement JSON",base+"/data.json","secondary","download")}</div></section>`;
+      ${provenance?`${table(["Frame","Original","Samples","Length","Status"],sourceRows)}
+        ${provenance.gaps.length?`<p class="notice">${provenance.gaps.length} stretch(es) of this trace had no original frame; they are drawn red on the overlay.</p>`:"<p class='soft'>Every traced sample has an original frame behind it.</p>"}
+        <h4>Which frame is at this point?</h4>
+        <div class="actions">${btn("Pick a point","trace-probe","secondary","search")}<span class="soft" id="trace-probe-out">Project any point onto this trace to read its original frame.</span></div>`
+        :table(["Segment","Length","Heading"],stations.map(item=>[item.index,`${n(item.length)} ${item.units}`,n(item.clockwise_heading)+"°"]))}
+      <div class="actions">${link("Measurement JSON",base+"/data.json","secondary","download")}${provenance?link("Source table CSV",base+"/provenance.csv","secondary","download"):""}</div></section>`;
   }
   return `<div class="grid-detail">${report}<div class="stack"><section class="card"><h3>Measure a visible shape</h3>
       <p class="soft">Trace along the image or measure visible support inside a saved sampling region.</p>
       <div class="actions">${btn("Trace a path","trace-add","primary","measure")}${btn("Measure region area","area-add","secondary","frame")}</div></section>
-      <section class="card"><h3>Saved geometry</h3><div class="divider-list">${results.map(item=>`<div class="row"><div class="grow">${e(item.title)}<br><small>${e(item.mode)} · revision ${item.specimen.version}</small></div>${btn("Open","metrology-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")||"<p class='soft'>No saved outlines.</p>"}</div></section></div></div>`;
+      ${joinCard()}
+      <section class="card"><h3>Saved geometry</h3><div class="divider-list">${results.map(item=>`<div class="row"><div class="grow">${e(item.title)}<br><small>${e(item.mode)} · revision ${item.specimen.version}${item.join?" · joined route":""}</small></div>${btn("Open","metrology-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")||"<p class='soft'>No saved outlines.</p>"}</div></section></div></div>`;
 }
 
 function receivedPage() {
@@ -250,14 +332,15 @@ function render() {
 
 async function gatherTile(token=travel) {
   const url=tileUrl();
-  const [results,packets,activity,refs,metrology]=await Promise.all([
-    api(url+"/results"),api(url+"/evidence"),api(url+"/activity"),api("/api/library"),api(url+"/metrology"),
+  const [results,packets,activity,refs,metrology,joins]=await Promise.all([
+    api(url+"/results"),api(url+"/evidence"),api(url+"/activity"),api("/api/library"),api(url+"/metrology"),api(url+"/joins"),
   ]);
   if (token!==travel) return;
   state.results=results.items;
   state.packets=packets.items;
   state.activity=activity.items;
   state.metrology=metrology.items;
+  state.joins=joins.items;
   state.refs=refs.items;
 }
 
@@ -270,7 +353,7 @@ async function route() {
     const tile=await api(`/api/specimens/${id}`);
     if (token!==travel) return;
     if (state.tile?.id!==tile.id || state.page!=="tile") {
-      state.tab="captures"; state.capture=null; state.result=null;state.layer="overlay";state.viewer="raw";state.metrologyActive=null;
+      state.tab="captures"; state.capture=null; state.result=null;state.layer="overlay";state.viewer="raw";state.metrologyActive=null;state.join=null;
     }
     state.tile=tile;
     await gatherTile(token);
@@ -405,6 +488,18 @@ function prepareDrawing(chosen, limit) {
   drawPoints=chosen.map(value=>[...value]);
   drawLimit=limit;
   drawUpdate();
+}
+
+async function probeTracePoint(x,y) {
+  const record=state.probeTrace;
+  if (!record) return;
+  const found=await api(`/api/metrology/${record.id}/source-at?x=${x}&y=${y}`);
+  const output=q("#trace-probe-out");
+  const message=found.photographed
+    ? `${found.source_code} · ${found.photo_name} supplies the nearest traced point.`
+    : "No original frame photographed the nearest traced point.";
+  if (output) output.textContent=message;
+  toast(message,!found.photographed);
 }
 
 function geometryForm(mode) {
@@ -714,6 +809,31 @@ async function doAction(name,target) {
     "trace-add":()=>geometryMeasurementForm("trace"),
     "area-add":()=>geometryMeasurementForm("area"),
     "metrology-open":()=>{state.metrologyActive=state.metrology.find(item=>item.id===id);render();},
+    "join-add":joinForm,
+    "join-open":()=>{state.join=state.joins.find(item=>item.id===id);render();},
+    "join-trace":joinTraceForm,
+    "join-probe":async ()=>{
+      if (!drawPoints.length) throw Error("Mark a point on the joined route first.");
+      const [x,y]=drawPoints.at(-1);
+      const found=await api(`/api/joins/${state.join.id}/source-at?x=${x}&y=${y}`);
+      const output=q("#join-probe-out");
+      if (output) output.textContent=found.photographed
+        ? `${found.source_code} · ${found.photo_name} supplies this point.`
+        : "No original frame photographed this point.";
+      toast(found.photographed?`Frame ${found.source_code} supplies this point.`:"This point is not photographed.",!found.photographed);
+    },
+    "trace-probe":async ()=>{
+      const record=state.metrologyActive;
+      if (!record?.shape.provenance) throw Error("Open a route trace first.");
+      const join=state.joins.find(item=>item.id===record.shape.provenance.join_id);
+      if (!join) throw Error("The joined route for this trace is no longer available.");
+      state.probeTrace=record;
+      modal("Which frame is at this point?",`<p class="notice">Click near this trace. The nearest traced sample reports the original frame that supplied it, or marks that the point was never photographed.</p>
+        ${drawing(join.image_url,"Joined route image")}
+        <div class="actions">${btn("Clear points","draw-clear","tiny secondary")}<span class="soft" id="trace-probe-out"></span></div>`,
+        null,null,true);
+      prepareDrawing([],1);
+    },
     "receive-add":importEvidence,
     "received-open":()=>{state.receivedActive=state.received.find(item=>item.id===id);render();},
     "defect-note":()=>{
@@ -777,6 +897,7 @@ document.addEventListener("click",event=>{
     const v=Math.min(1,Math.max(0,(event.clientY-rect.top)/rect.height));
     drawPoints.push([Number(u.toFixed(6)),Number(v.toFixed(6))]);
     drawUpdate();
+    if (state.probeTrace) void probeTracePoint(u,v);
   }
 });
 
@@ -820,6 +941,7 @@ document.addEventListener("change",event=>{
 });
 
 dialog.addEventListener("close",()=>{
+  state.probeTrace=null;
   qa("[data-blob]",dialog).forEach(el=>URL.revokeObjectURL(el.dataset.blob));
 });
 window.addEventListener("hashchange",()=>{void route().catch(displayFault);});

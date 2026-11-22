@@ -174,6 +174,19 @@ def warp_capture(rgb, alpha, destination, transform):
     return linear, coverage, clipped
 
 
+def capture_plane_corners(tile, photo_id):
+    """Corners of the shared plane quad as marked on one registered capture."""
+    plane = tile.get("plane")
+    if plane is None:
+        raise InputError("Set a base photo and mark the tile plane first.")
+    if photo_id == plane["photo_id"]:
+        return plane["corners"]
+    registration = tile["registrations"].get(photo_id)
+    if registration is None or registration["base_photo_id"] != plane["photo_id"]:
+        raise InputError("Register this capture in the specimen plane first.")
+    return registration["corners"]
+
+
 def specimen_frame(blobs, tile, photo_id=None):
     plane = tile.get("plane")
     if plane is None:
@@ -182,13 +195,7 @@ def specimen_frame(blobs, tile, photo_id=None):
     photo = next((item for item in tile["photos"] if item["id"] == identifier), None)
     if photo is None:
         raise InputError("The selected capture was removed from this specimen.")
-    if identifier == plane["photo_id"]:
-        corners = plane["corners"]
-    else:
-        registration = tile["registrations"].get(identifier)
-        if registration is None or registration["base_photo_id"] != plane["photo_id"]:
-            raise InputError("Mark corresponding corners on this capture before comparing illumination.")
-        corners = registration["corners"]
+    corners = capture_plane_corners(tile, identifier)
     transform = homography(DEFAULT_CORNERS, corners)
     destination = tuple(plane["size"])
     rgb, alpha = open_working(blobs, photo)

@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS metrology (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS metrology_tile ON metrology(tile_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS joins (
+    id TEXT PRIMARY KEY,
+    tile_id TEXT NOT NULL REFERENCES specimens(id),
+    document TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS joins_tile ON joins(tile_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -472,5 +479,30 @@ class Store:
             self._tile(conn, chosen)
             rows = conn.execute(
                 "SELECT document FROM metrology WHERE tile_id=? ORDER BY rowid DESC LIMIT 50", (chosen,),
+            ).fetchall()
+            return [json.loads(row["document"]) for row in rows]
+
+    def save_join(self, fields):
+        record = {**fields, "created_at": timestamp()}
+        with self.transaction(write=True) as conn:
+            conn.execute(
+                "INSERT INTO joins(id,tile_id,document,created_at) VALUES (?,?,?,?)",
+                (record["id"], record["tile_id"], document(record), record["created_at"]),
+            )
+            event(conn, record["tile_id"], "join", f"Joined overlapping captures: {record['name']}")
+        return record
+
+    def join(self, identifier):
+        chosen = identity(identifier, "Joined route ID")
+        with self.connect() as conn:
+            row = conn.execute("SELECT document FROM joins WHERE id=?", (chosen,)).fetchone()
+            return artifact_row(row, "Joined route")
+
+    def list_joins(self, tile_id):
+        chosen = identity(tile_id, "Specimen ID")
+        with self.connect() as conn:
+            self._tile(conn, chosen)
+            rows = conn.execute(
+                "SELECT document FROM joins WHERE tile_id=? ORDER BY rowid DESC LIMIT 40", (chosen,),
             ).fetchall()
             return [json.loads(row["document"]) for row in rows]

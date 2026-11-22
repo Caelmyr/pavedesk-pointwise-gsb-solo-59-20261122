@@ -107,6 +107,28 @@ def result_metrics_table(record):
     return csv_lines(columns, rows)
 
 
+def metrology_provenance_table(record):
+    """One row per contiguous stretch of a joined-route trace and its supplying frame."""
+    shape = record.get("shape") or {}
+    provenance = shape.get("provenance")
+    if not provenance:
+        raise InputError("This geometry record was not traced on a joined route.")
+    columns = (
+        "segment", "from_fraction", "to_fraction", "source_code", "photo_id", "photo_name", "samples", "length",
+        "length_unit", "photographed",
+    )
+    length_unit = shape.get("length_unit", "")
+    rows = []
+    for piece in provenance["segments"]:
+        for run in piece["runs"]:
+            rows.append([
+                piece["index"], run["from_fraction"], run["to_fraction"],
+                run["source_code"] or "", run["photo_id"] or "", run["photo_name"],
+                run["samples"], run["length"], length_unit, "yes" if run["source_code"] else "no",
+            ])
+    return csv_lines(columns, rows)
+
+
 def study_table(report):
     columns = ("tile_name", "tile_id", "group", "measurement_id", "version", "value", "support")
     return csv_lines(columns, ([item[key] for key in columns] for item in report["rows"]))
