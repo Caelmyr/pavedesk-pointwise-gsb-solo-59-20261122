@@ -452,12 +452,17 @@ class Store:
 
     def save_metrology(self, fields):
         record = {**fields, "id": make_id(), "created_at": timestamp()}
+        action_label = (
+            "Adopted main fissure sealing line"
+            if fields.get("mode") == "fracture-line"
+            else "Measured area in the tile plane"
+        )
         with self.transaction(write=True) as conn:
             conn.execute(
                 "INSERT INTO metrology(id,tile_id,document,created_at) VALUES (?,?,?,?)",
                 (record["id"], record["tile_id"], document(record), record["created_at"]),
             )
-            event(conn, record["tile_id"], "geometry", f"Measured area in the tile plane: {record['title']}")
+            event(conn, record["tile_id"], "geometry", f"{action_label}: {record['title']}")
         return record
 
     def metrology(self, identifier):

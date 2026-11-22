@@ -20,6 +20,7 @@ let travel=0;
 let dialogToken=0;
 let drawPoints=[];
 let drawLimit=0;
+let drawLetters=false;
 let currentForm=null;
 let reviewUploads=[];
 
@@ -170,24 +171,71 @@ function geometryPage() {
   const record=state.metrologyActive;
   const results=state.metrology||[];
   const tile=state.tile;
-  let report=empty("Save a traced path or the area of an existing sampling region.");
+  let report=empty("Save a traced path, adopt one main fissure line, or measure the area of an existing sampling region.");
   if (record) {
-    const metrics=record.shape;
     const base=`/api/metrology/${record.id}`;
-    const stats=record.mode==="trace"
-      ? [["Trace length",`${n(metrics.trace_length)} ${metrics.length_unit}`],["Supported stations",percent(metrics.overall_support)]]
-      : [["Marked area",`${n(metrics.vector_outline_area)} ${metrics.units}`],["Visible area",`${n(metrics.raster_supported_area)} ${metrics.units}`],["Outline",`${n(metrics.outline_length)} ${metrics.outline_unit}`]];
-    const stations=record.mode==="trace"?metrics.segments:metrics.outline_segments;
-    report=`<section class="card stack"><h3>${e(record.title)}</h3>
-      <figure class="stage">${img(base+"/overlay.png",record.title)}</figure>
-      <div class="metrics">${stats.map(([name,value])=>stat(name,value)).join("")}</div>
-      ${table(["Segment","Length","Heading"],stations.map(item=>[item.index,`${n(item.length)} ${item.units}`,n(item.clockwise_heading)+"°"]))}
-      <div class="actions">${link("Measurement JSON",base+"/data.json","secondary","download")}</div></section>`;
+    if (record.mode==="fracture-line") report=fractureCard(record,base);
+    else {
+      const metrics=record.shape;
+      const stats=record.mode==="trace"
+        ? [["Trace length",`${n(metrics.trace_length)} ${metrics.length_unit}`],["Supported stations",percent(metrics.overall_support)]]
+        : [["Marked area",`${n(metrics.vector_outline_area)} ${metrics.units}`],["Visible area",`${n(metrics.raster_supported_area)} ${metrics.units}`],["Outline",`${n(metrics.outline_length)} ${metrics.outline_unit}`]];
+      const stations=record.mode==="trace"?metrics.segments:metrics.outline_segments;
+      report=`<section class="card stack"><h3>${e(record.title)}</h3>
+        <figure class="stage">${img(base+"/overlay.png",record.title)}</figure>
+        <div class="metrics">${stats.map(([name,value])=>stat(name,value)).join("")}</div>
+        ${table(["Segment","Length","Heading"],stations.map(item=>[item.index,`${n(item.length)} ${item.units}`,n(item.clockwise_heading)+"°"]))}
+        <div class="actions">${link("Measurement JSON",base+"/data.json","secondary","download")}</div></section>`;
+    }
   }
   return `<div class="grid-detail">${report}<div class="stack"><section class="card"><h3>Measure a visible shape</h3>
-      <p class="soft">Trace along the image or measure visible support inside a saved sampling region.</p>
-      <div class="actions">${btn("Trace a path","trace-add","primary","measure")}${btn("Measure region area","area-add","secondary","frame")}</div></section>
-      <section class="card"><h3>Saved geometry</h3><div class="divider-list">${results.map(item=>`<div class="row"><div class="grow">${e(item.title)}<br><small>${e(item.mode)} · revision ${item.specimen.version}</small></div>${btn("Open","metrology-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")||"<p class='soft'>No saved outlines.</p>"}</div></section></div></div>`;
+      <p class="soft">Trace along the image, adopt one main fissure between two endpoints, or measure visible support inside a saved sampling region.</p>
+      <div class="actions">${btn("Trace a path","trace-add","primary","measure")}${btn("Adopt main fissure","fracture-add","secondary","measure")}${btn("Measure region area","area-add","secondary","frame")}</div></section>
+      <section class="card"><h3>Saved geometry</h3><div class="divider-list">${results.map(item=>{
+        const modeLabel={trace:"traced path",area:"region area","fracture-line":"main fissure line"}[item.mode]||item.mode;
+        return `<div class="row"><div class="grow">${e(item.title)}<br><small>${e(modeLabel)} · revision ${item.specimen.version}</small></div>${btn("Open","metrology-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`;
+      }).join("")||"<p class='soft'>No saved outlines.</p>"}</div></section></div></div>`;
+}
+
+function fractureCard(record, base) {
+  const shape=record.shape;
+  const unit=shape.length_unit;
+  const basis=record.review_basis;
+  const basisRows=basis ? basis.matched_decisions.map(item=>
+    [item.key,item.type,item.decision,`${n(item.distance_px,1)} px`,e(item.notes||"—")]) : [];
+  return `<section class="card stack"><div class="title-row"><div><h3>${e(record.title)}</h3>
+      <small>Main fissure sealing line · adopted ${e(date(record.created_at))}</small></div>${badge("Single main line","ready")}</div>
+    <figure class="stage">${img(base+"/overlay.png",record.title)}</figure>
+    <p class="legend"><span><i class="dot" style="background:#6ed696"></i>Photographed linework</span>
+      <span><i class="dot" style="background:#f0b552"></i>Inferred across obscured surface</span>
+      <span><i class="dot" style="background:#a2e1ab"></i>Confirmed review markers</span></p>
+    <div class="metrics">
+      ${stat("Sealing length",`${n(shape.trace_length)} ${unit}`)}
+      ${stat("Photographed",`${n(shape.photographed_length)} ${unit}`)}
+      ${stat("Inferred",`${n(shape.inferred_length)} ${unit}`)}
+      ${stat("Photographed share",percent(shape.photographed_percent))}
+    </div>
+    ${shape.warnings?.length?shape.warnings.map(w=>`<p class="notice warn">${e(w)}</p>`).join(""):""}
+    <h3>Adopted segments</h3>
+    ${table(["#","Basis",`Length (${unit})`,`Photographed (${unit})`,`Inferred (${unit})`,"Heading"],shape.segments.map(item=>
+      [item.index,item.basis,n(item.length),n(item.photographed_length),n(item.inferred_length),n(item.clockwise_heading)+"°"]))}
+    <details><summary>Inferred runs across obscured surface (${shape.inferred_runs.length})</summary>
+      ${shape.inferred_runs.length?table(["From","To",`Length (${unit})`,"Mean contrast","Obscured"],shape.inferred_runs.map(run=>
+        [run.from.join(", "),run.to.join(", "),n(run.length),n(run.mean_contrast,4),run.obscured?badge("Obscured","caution"):badge("Low trace","")])):"<p class='soft'>The whole line follows photographed linework.</p>"}</details>
+    ${basis?`<h3>Review basis frozen at adoption</h3>
+      <p class="soft">${e(basis.label)} · version ${basis.result_version} · reviewed ${e(date(basis.reviewed_at))} · match tolerance ${basis.match_tolerance_px} px. Later review changes do not alter this record.</p>
+      <div class="actions">${btn("Open the review this line was based on","result-open","tiny secondary","book",`data-id="${basis.result_id}"`)}</div>
+      ${basisRows.length?table(["Marker","Type","Decision","Distance","Note"],basisRows):"<p class='notice'>No confirmed marker fell within the match tolerance of the adopted line.</p>"}`:""}
+    <details><summary>Detector and endpoint basis</summary>${table(["Property","Value"],[
+      ["Traced line pixels",shape.detector.traced_pixels],
+      ["Line sensitivity",shape.detector.options.sensitivity],
+      ["Line width radius px",shape.detector.options.radius],
+      ["Off-trace penalty",shape.detector.trace_penalty],
+      ["Endpoint A snap px",shape.anchor_snap_px[0]],
+      ["Endpoint B snap px",shape.anchor_snap_px[1]],
+      ["Length unit",unit],
+    ])}</details>
+    <div class="actions">${link("Measurement JSON",base+"/data.json","secondary","download")}</div></section>`;
 }
 
 function receivedPage() {
@@ -395,15 +443,17 @@ function drawUpdate() {
   if (!artist) return;
   const coords=drawPoints.map(([x,y])=>[x*1000,y*1000]);
   const edges=(drawLimit===2||coords.length<3)?"polyline":"polygon";
+  const marks=drawLetters?["A","B"]:null;
   artist.innerHTML=`<${edges} class="draw-line" points="${coords.map(pair=>pair.join(",")).join(" ")}"></${edges}>
-    ${coords.map(([x,y],index)=>`<circle class="draw-point" cx="${x}" cy="${y}" r="10"/><text class="draw-label" x="${x+16}" y="${y+16}">${index+1}</text>`).join("")}`;
+    ${coords.map(([x,y],index)=>`<circle class="draw-point" cx="${x}" cy="${y}" r="10"/><text class="draw-label" x="${x+16}" y="${y+16}">${marks?marks[index]??"":index+1}</text>`).join("")}`;
   const label=q("#draw-count");
   if (label) label.textContent=`${drawPoints.length} of ${drawLimit} points marked`;
 }
 
-function prepareDrawing(chosen, limit) {
+function prepareDrawing(chosen, limit, letters=false) {
   drawPoints=chosen.map(value=>[...value]);
   drawLimit=limit;
+  drawLetters=letters;
   drawUpdate();
 }
 
@@ -511,6 +561,48 @@ function pairForm() {
       parent.innerHTML=`<figure class="stage">${img(uri,"Registered pair comparison")}</figure>
         <div class="metrics">${stat("Shared pixels",n(support.support_overlap_px,0))}${stat("Edges compared",n(support.edge_positions_compared,0))}</div>`;
     },true);
+}
+
+function fractureForm() {
+  const base=state.tile.photos.find(item=>item.registration_state==="base");
+  if (!base) throw Error("Set a base photo before adopting a fissure line.");
+  const reviews=state.results.filter(item=>item.kind==="defects");
+  const reviewOptions=option("","No review basis","")+reviews.map(item=>
+    option(item.id,`${item.label} · revision ${item.source_version} · ${date(item.created_at)}`)).join("");
+  modal("Adopt main fissure line",`
+    <p class="notice">Mark the two ends of the main crack (start A, end B). The workbench keeps one single line: it follows photographed fissure traces where they exist and only infers across obscured surface such as the wet mark. Photographed and inferred lengths are reported separately.</p>
+    ${textField("Measurement title","title","Main fissure sealing length",'required maxlength="90"')}
+    ${drawing(base.registered_url,"Specimen plane for main fissure endpoints")}
+    <div class="actions">${btn("Clear points","draw-clear","tiny secondary")}${btn("Undo point","draw-undo","tiny ghost")}<span class="soft" id="draw-count"></span></div>
+    <div class="form-columns">
+      ${selectField("Visible defects review basis","review_result_id",reviewOptions)}
+      ${numField("Review match tolerance px","review_tolerance_px",12,4,40,1)}
+    </div>
+    <details><summary>Trace detector options</summary><div class="form-columns">
+      ${numField("Line width radius px","radius",1.4,0.6,5,0.1)}
+      ${numField("Line sensitivity","sensitivity",0.72,0,1,0.02)}
+      ${numField("Bridge width px","join_px",1,0,4,1)}
+      ${numField("Minimum trace px","component_minimum",12,2,150,1)}
+    </div></details>`,
+    "Adopt single line",async data=>{
+      if (drawPoints.length!==2) throw Error("Mark the start and end of the main fissure.");
+      const payload={
+        title:data.get("title"),
+        points:drawPoints,
+        review_result_id:data.get("review_result_id")||null,
+        review_tolerance_px:Number(data.get("review_tolerance_px")),
+        radius:Number(data.get("radius")),
+        sensitivity:Number(data.get("sensitivity")),
+        join_px:Number(data.get("join_px")),
+        component_minimum:Number(data.get("component_minimum")),
+      };
+      state.metrologyActive=await api(tileUrl()+"/main-fissure",{method:"POST",body:payload});
+      await gatherTile();
+      commitModal();
+      toast("Main fissure line adopted.");
+      render();
+    },true);
+  prepareDrawing([],2,true);
 }
 
 function geometryMeasurementForm(mode) {
@@ -712,6 +804,7 @@ async function doAction(name,target) {
     },
     "mark-profile":lineForm,
     "trace-add":()=>geometryMeasurementForm("trace"),
+    "fracture-add":fractureForm,
     "area-add":()=>geometryMeasurementForm("area"),
     "metrology-open":()=>{state.metrologyActive=state.metrology.find(item=>item.id===id);render();},
     "receive-add":importEvidence,

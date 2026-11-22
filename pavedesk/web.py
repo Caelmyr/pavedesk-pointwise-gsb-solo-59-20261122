@@ -22,6 +22,7 @@ from .evidence import (
 from .inspection import side_preview, viewing_pair
 from .art import base_rgba
 from .intake import MAX_ARCHIVE_BYTES, inspect_packet
+from .fracture import create_fracture_line
 from .metrology import create_metrology
 from .model import (
     ANALYSIS_LABELS,
@@ -414,6 +415,12 @@ def register_desks(api, store, heavy):
     def geometry_make(specimen_id):
         with heavy:
             record = create_metrology(store, specimen_id, json_request())
+        return jsonify(record), 201
+
+    @api.post("/specimens/<specimen_id>/main-fissure")
+    def main_fissure_make(specimen_id):
+        with heavy:
+            record = create_fracture_line(store, specimen_id, json_request())
         return jsonify(record), 201
 
     @api.get("/metrology/<entry_id>/overlay.png")
