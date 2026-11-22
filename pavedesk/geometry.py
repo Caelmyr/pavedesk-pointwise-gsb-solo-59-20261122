@@ -145,7 +145,7 @@ def map_coordinates(matrix, target_x, target_y, source_width, source_height):
     return mapped_x * source_width - 0.5, mapped_y * source_height - 0.5
 
 
-def warp_capture(rgb, alpha, destination, transform):
+def warp_capture(rgb, alpha, destination, transform, plane_clip=None):
     source_height, source_width = alpha.shape
     width, height = destination
     target_x = (np.arange(width, dtype=np.float32)[None, :] + 0.5) / width
@@ -155,6 +155,16 @@ def warp_capture(rgb, alpha, destination, transform):
     linear = np.zeros((height, width, 3), dtype=np.float32)
     coverage = np.zeros((height, width), dtype=bool)
     clipped = np.zeros((height, width), dtype=bool)
+    if plane_clip is not None:
+        x0, y0, x1, y1 = plane_clip
+        grid_x = np.arange(width, dtype=np.float32)[None, :]
+        grid_y = np.arange(height, dtype=np.float32)[:, None]
+        inside_clip = (
+            (grid_x >= x0 * width) & (grid_x < x1 * width)
+            & (grid_y >= y0 * height) & (grid_y < y1 * height)
+        )
+    else:
+        inside_clip = None
     for start in range(0, height, WARP_ROW_BLOCK):
         stop = min(start + WARP_ROW_BLOCK, height)
         target_y = (np.arange(start, stop, dtype=np.float32)[:, None] + 0.5) / height
@@ -163,6 +173,8 @@ def warp_capture(rgb, alpha, destination, transform):
         coordinates = (src_y, src_x)
         opacity = ndimage.map_coordinates(alpha, coordinates, order=1, mode="nearest")
         present = within & (opacity >= MIN_SUPPORT_ALPHA)
+        if inside_clip is not None:
+            present &= inside_clip[start:stop]
         coverage[start:stop] = present
         clipped[start:stop] = (
             ndimage.map_coordinates(src_clip.astype(np.float32), coordinates, order=1, mode="nearest") > 0.025
@@ -192,7 +204,8 @@ def specimen_frame(blobs, tile, photo_id=None):
     transform = homography(DEFAULT_CORNERS, corners)
     destination = tuple(plane["size"])
     rgb, alpha = open_working(blobs, photo)
-    linear, valid, clipped = warp_capture(rgb, alpha, destination, transform)
+    clip = registration.get("plane_clip") if identifier != plane["photo_id"] else None
+    linear, valid, clipped = warp_capture(rgb, alpha, destination, transform, plane_clip=clip)
     if np.count_nonzero(valid) < 64:
         raise InputError("The marked specimen plane contains too few usable pixels.")
     return SampleFrame(linear, valid, photo, tuple(transform.ravel()), physical_scale(tile, *destination), clipped)

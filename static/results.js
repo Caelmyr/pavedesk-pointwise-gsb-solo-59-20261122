@@ -1,7 +1,17 @@
 import {badge, btn, e, img, link, n, percent, plot, stat, table, date, dots} from "./widgets.js";
 
 const colors = ["#58836b","#b26a4a","#818d40","#786f99"];
-const layers = {overlay:"Measurement map",source:"Source plane",paired:"Paired plane",reference:"Reference image"};
+const layers = {
+  overlay:"Measurement map",source:"Morning parallel plane",paired:"Later parallel plane",
+  morning_cross:"Morning cross plane",later_cross:"Later cross plane",reference:"Reference image",
+};
+const MOISTURE_ZONE_LABELS = {
+  "confirmed":"两次可核（早晚均见）",
+  "morning-only-missing-later":"仅早图·晚图漏拍",
+  "morning-only-later-dry":"仅早图·晚图已干",
+  "old-paint-reflection":"老漆反光（剔除）",
+  "unmeasured":"无数据",
+};
 
 export function metricSet(record) {
   const m = record.metrics;
@@ -22,6 +32,13 @@ export function metricSet(record) {
     marking: () => [["Measured stations",percent(m.observed_percent)],["Paint among measured",percent(m.paint_percent_of_observed)],["Runs",m.runs.length]],
     joint: () => [["Measured stations",m.measured_stations],["Unmeasured stations",m.unmeasured_stations],["Median absolute contrast",n(m.median_absolute_step,4)]],
     aggregate: () => [["Bright clusters",m.candidate_clusters],["Supported pixels",m.observed_pixels],["Bright fraction",percent(m.bright_fraction_of_support)]],
+    moisture: () => [
+      ["派复查总面积",`${n(m.dispatch_area.area_mm2)} ${m.unit}`],
+      ["复查范围占比",percent(m.dispatch_area.percent_of_plane)],
+      ["两次可核",`${n(m.zone_areas.confirmed.area_mm2)} ${m.unit}`],
+      ["仅早图·漏拍",`${n(m.zone_areas["morning-only-missing-later"].area_mm2)} ${m.unit}`],
+      ["晚图覆盖率",percent(m.support.later_support_percent)],
+    ],
   }[record.kind]();
   return `<div class="metrics">${rows.map(([name,value])=>stat(name,value)).join("")}</div>`;
 }
@@ -117,18 +134,47 @@ function referenceDetail(m) {
     <p class="notice">${e(m.capture_note)}</p>`;
 }
 
+function moistureDetail(m) {
+  const zoneRows=Object.entries(m.zone_areas).map(([key,item])=>[
+    MOISTURE_ZONE_LABELS[key]||key,
+    n(item.pixels,0),
+    item.area_mm2==null?"—":`${n(item.area_mm2)} ${m.unit}`,
+    percent(item.percent_of_plane),
+  ]);
+  const componentRows=Object.entries(m.components).flatMap(([key,list])=>list.slice(0,8).map((item,i)=>[
+    `${MOISTURE_ZONE_LABELS[key]||key} #${i+1}`,n(item.zone_pixels,0),
+    item.area_mm2==null?"—":`${n(item.area_mm2)} ${m.unit}`,item.bounds.map(v=>n(v,3)).join(", "),
+  ]));
+  return `<h3>湿痕复查分区与面积</h3>
+    <p class="plot-note">派复查范围 = 两次可核 + 仅早图且晚图漏拍。仅早图但晚图已干、老漆反光不派复查。单位 ${e(m.unit)}。</p>
+    ${table(["证据分区","像素","面积","占整面比例"],zoneRows)}
+    <h3>覆盖与信号诊断</h3>
+    <div class="metrics">
+      ${stat("早组有效覆盖",percent(m.support.morning_support_percent))}
+      ${stat("晚组有效覆盖",percent(m.support.later_support_percent))}
+      ${stat("两组共同覆盖",percent(m.support.shared_support_percent))}
+      ${stat("晚图缺失像素",n(m.support.later_missing_pixels,0))}
+      ${stat("老漆剔除像素",n(m.support.paint_excluded_pixels,0))}
+      ${stat("晚图独有热点(不派)",n(m.support.later_only_hot_pixels,0))}
+    </div>
+    <h3>派复查斑块（最大斑块明细）</h3>
+    ${componentRows.length?table(["斑块","像素","面积","归一化边界"],componentRows):"<p class='soft'>无满足最小面积的斑块。</p>"}
+    <p class="plot-note">${e(m.note)}</p>`;
+}
+
 function details(record) {
   const render = {
     color:colorDetail,coverage:coverageDetail,defects:defectsDetail,glare:glareDetail,
     direction:directionDetail,texture:textureDetail,profile:profileDetail,reference:referenceDetail,craze:crazeDetail,rim:rimDetail,
-    marking:markingDetail,joint:jointDetail,aggregate:aggregateDetail,
+    marking:markingDetail,joint:jointDetail,aggregate:aggregateDetail,moisture:moistureDetail,
   }[record.kind];
   return render(record.kind==="defects" ? record : record.metrics);
 }
 
 export function resultCard(record, layer, currentRevision) {
   const path=`/api/results/${record.id}`;
-  const available = ["overlay","source",...(record.pictures.paired ? ["paired"] : []),...(record.metrics.reference_image ? ["reference"] : [])];
+  const extra=record.kind==="moisture" ? ["morning_cross","later_cross"] : [];
+  const available = ["overlay","source",...(record.pictures.paired ? ["paired"] : []),...extra,...(record.metrics.reference_image ? ["reference"] : [])];
   const old = record.source_version !== currentRevision;
   return `<section class="card stack">
     <div class="title-row"><div><h3>${e(record.label)}</h3><small>Specimen revision ${record.source_version} · ${e(date(record.created_at))}</small></div>${old ? badge("Earlier specimen revision","caution") : badge("Saved measurement","ready")}</div>

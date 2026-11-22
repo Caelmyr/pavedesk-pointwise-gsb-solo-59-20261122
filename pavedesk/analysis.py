@@ -25,6 +25,7 @@ from .craze import measure_craze
 from .rim import measure_rim
 from .geometry import active_region, analysis_mask, region_domain, specimen_frame
 from .lighting import measure_direction, measure_glare
+from .moisture import measure_moisture
 from .model import ANALYSIS_LABELS, InputError, library_fields
 from .parameters import TOOLS, analysis_parameters
 from .profile import measure_profile
@@ -130,6 +131,16 @@ def approve_reference(store, payload):
 def resolve_parameters(store, tile, payload):
     params = analysis_parameters(payload)
     kind = params["kind"]
+    if kind == "moisture":
+        registered = {tile["plane"]["photo_id"], *tile["registrations"]} if tile.get("plane") else set()
+        for visit, pair in params["visits"].items():
+            for role, photo_id in pair.items():
+                found = next((item for item in tile["photos"] if item["id"] == photo_id), None)
+                if found is None:
+                    raise InputError(f"The {visit} {role} photo is no longer attached to this specimen.")
+                if photo_id not in registered:
+                    raise InputError("Register all four polarization photos in the tile plane first.")
+        return params, None
     setting = TOOLS[kind]
     roles = setting.get("capture_pair")
     params["photo_id"] = selected_capture(tile, params["photo_id"], roles[0] if roles else None)
@@ -252,6 +263,8 @@ def evaluate(store, tile_id, payload):
     cached = store.get_cached_result(cache_key)
     if cached:
         return cached
+    if params["kind"] == "moisture":
+        return evaluate_moisture(store, tile, params, cache_key)
     frame = specimen_frame(store.blobs, tile, params["photo_id"])
     region = active_region(tile, params["region_id"])
     area = region_domain(frame.extent, tile, region)
@@ -293,6 +306,52 @@ def evaluate(store, tile_id, payload):
             "source": stored_preview(base_rgba(frame, linear), store.blobs),
             "overlay": stored_preview(picture, store.blobs),
             "paired": stored_preview(base_rgba(pair), store.blobs) if pair else None,
+        },
+    }
+    return store.save_result(cache_key, result)
+
+
+def evaluate_moisture(store, tile, params, cache_key):
+    region = active_region(tile, params["region_id"])
+    metrics, picture, frames, visits, legend = measure_moisture(store, tile, params["visits"], region, params["options"])
+    morning_parallel = frames["morning"]["parallel"]
+    morning_cross = frames["morning"]["cross"]
+    later_parallel = frames["later"]["parallel"]
+    later_cross = frames["later"]["cross"]
+    area = region_domain(morning_parallel.extent, tile, region)
+    result = {
+        "tile_id": tile["id"],
+        "source_version": tile["version"],
+        "kind": "moisture",
+        "label": ANALYSIS_LABELS["moisture"],
+        "parameters": params,
+        "metrics": metrics,
+        "legend": legend,
+        "basis": {
+            "photo_role": "parallel",
+            "synthetic": bool(morning_parallel.photo["synthetic"]),
+            "neutral_target": None,
+            "source_space": morning_parallel.photo["working_color_space"],
+            "tile_id": tile["id"],
+        },
+        "support": support_digest(morning_parallel, area),
+        "provenance": {
+            "analyzer_version": ANALYZER_VERSION,
+            "specimen": specimen_provenance(tile),
+            "photo": capture_provenance(morning_parallel),
+            "paired_photo": capture_provenance(later_parallel),
+            "visits": visits,
+            "region": region,
+            "exclusions": [item for item in tile["regions"] if item["purpose"] == "ignore"],
+            "neutral_card": None,
+            "reference": None,
+        },
+        "pictures": {
+            "source": stored_preview(base_rgba(morning_parallel), store.blobs),
+            "overlay": stored_preview(picture, store.blobs),
+            "paired": stored_preview(base_rgba(later_parallel), store.blobs),
+            "morning_cross": stored_preview(base_rgba(morning_cross), store.blobs),
+            "later_cross": stored_preview(base_rgba(later_cross), store.blobs),
         },
     }
     return store.save_result(cache_key, result)

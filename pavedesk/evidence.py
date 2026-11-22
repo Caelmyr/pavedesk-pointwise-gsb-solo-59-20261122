@@ -89,6 +89,21 @@ def result_metrics_table(record):
     elif kind == "glare":
         columns = ("pixels", "area_mm2", "bounds")
         rows = ([item[key] for key in columns] for item in metrics["hotspots"])
+    elif kind == "moisture":
+        columns = ("zone", "dispatch", "pixels", "area_mm2", "percent_of_plane", "percent_of_review_area")
+        zone_labels = {
+            "confirmed": "两次可核（早+晚）",
+            "morning-only-missing-later": "仅早图·晚图漏拍",
+            "morning-only-later-dry": "仅早图·晚图已干",
+            "old-paint-reflection": "老漆反光",
+            "unmeasured": "无数据",
+        }
+        dispatch = {"confirmed", "morning-only-missing-later"}
+        rows = (
+            [zone_labels.get(zone, zone), "yes" if zone in dispatch else "no",
+             *(entry[key] for key in ("pixels", "area_mm2", "percent_of_plane", "percent_of_review_area"))]
+            for zone, entry in metrics["zone_areas"].items()
+        )
     elif kind == "marking":
         fields = ("condition", "first_station", "last_station", "stations", "midpoint_normalized", "median_cross_width")
         columns = ("unit", *fields)
@@ -116,7 +131,10 @@ def source_index(tile, results):
     originals = {}
     for result in results:
         provenance = result["provenance"]
-        for capture in (provenance["photo"], provenance["paired_photo"]):
+        captures = [provenance["photo"], provenance["paired_photo"]]
+        for visit in (provenance.get("visits") or {}).values():
+            captures.extend(visit.values())
+        for capture in captures:
             if not capture:
                 continue
             digest = capture["original_digest"]
@@ -125,6 +143,7 @@ def source_index(tile, results):
                 "digest": digest,
                 "name": capture["display_name"],
                 "role": capture["role"],
+                "visit": capture.get("visit"),
                 "mime": current["original_mime"] if current else None,
             }
     return list(originals.values())
@@ -266,14 +285,19 @@ def evidence_zip(store, entry):
             zipfile.writestr(f"measurements/{name}.json", artifact_json(record))
             zipfile.writestr(f"measurements/{name}.csv", result_metrics_table(record))
             for view, digest in record["pictures"].items():
-                if digest:
+                if not digest:
+                    continue
+                if view in ("source", "overlay", "paired"):
                     zipfile.writestr(exported_image_name(record, view), store.blobs.get(digest))
+                else:
+                    zipfile.writestr(f"measurements/{name}-{view}.png", store.blobs.get(digest))
         for source in entry["originals"]:
             suffix = PurePath(source["name"]).suffix.lower().strip(".")
             suffix = suffix if suffix in ("png", "jpg", "jpeg", "tif", "tiff", "webp") else "img"
             basename = filename_stem(PurePath(source["name"]).stem, "original")
+            visit = f"-{source['visit']}" if source.get("visit") else ""
             file = store.blobs.require(source["digest"])
-            zipfile.write(file, f"originals/{basename}-{source['digest'][:10]}.{suffix}")
+            zipfile.writestr(f"originals/{basename}{visit}-{source['digest'][:10]}.{suffix}", file.read_bytes())
     return stream.getvalue()
 
 
@@ -292,6 +316,7 @@ def summarize_result(record):
         "marking": ("observed_percent", "paint_percent_of_observed", "stations"),
         "joint": ("measured_stations", "unmeasured_stations", "median_absolute_step"),
         "aggregate": ("candidate_clusters", "observed_pixels", "bright_fraction_of_support"),
+        "moisture": ("dispatch_area", "zone_areas", "support"),
     }[record["kind"]]
     summary = {key: record[key] for key in (
         "id", "kind", "label", "tile_id", "source_version", "created_at", "version", "basis",

@@ -8,6 +8,7 @@ from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 
 from .analysis import approve_reference, evaluate
 from .demo import load_training, preview_photo
+from .moisture_demo import load_moisture_demo
 from .evidence import (
     artifact_json,
     create_evidence,
@@ -126,9 +127,10 @@ def register_specimens(api, store, heavy):
             raise InputError("Reload the specimen before uploading photos.") from error
         role = request.form.get("role", "diffuse")
         note = request.form.get("note", "")
+        visit = request.form.get("visit") or None
         file_content = capture.stream.read(MAX_UPLOAD + 1)
         with heavy:
-            changed = import_photo(store, specimen_id, revision, file_content, capture.filename, role, note)
+            changed = import_photo(store, specimen_id, revision, file_content, capture.filename, role, note, visit)
         return jsonify(present_tile(changed)), 201
 
     @api.patch("/specimens/<specimen_id>/photos/<photo_id>")
@@ -252,8 +254,12 @@ def register_measurements(api, store, heavy):
     @api.get("/results/<measurement_id>/image/<layer>")
     def measurement_image(measurement_id, layer):
         data = store.result(measurement_id)
-        chosen = enumeration(layer, ("overlay", "source", "paired", "reference"), "Measurement image")
-        digest = data["metrics"].get("reference_image") if chosen == "reference" else data["pictures"][chosen]
+        chosen = enumeration(
+            layer,
+            ("overlay", "source", "paired", "reference", "morning_cross", "later_cross"),
+            "Measurement image",
+        )
+        digest = data["metrics"].get("reference_image") if chosen == "reference" else data["pictures"].get(chosen)
         return png_blob(store, digest)
 
     @api.get("/results/<measurement_id>/metrics.csv")
@@ -436,6 +442,12 @@ def register_training(api, store, heavy):
     def training():
         with heavy:
             tiles, created = load_training(store)
+        return jsonify({"items": [summarize_tile(tile) for tile in tiles], "created": created}), 201 if created else 200
+
+    @api.post("/training/moisture")
+    def moisture_training():
+        with heavy:
+            tiles, created = load_moisture_demo(store)
         return jsonify({"items": [summarize_tile(tile) for tile in tiles], "created": created}), 201 if created else 200
 
 

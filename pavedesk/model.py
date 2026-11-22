@@ -52,6 +52,11 @@ ANALYSIS_LABELS = {
     "marking": "Marking wear scan",
     "joint": "Repair seam scan",
     "aggregate": "Exposed aggregate",
+    "moisture": "Moisture recheck plan",
+}
+VISIT_LABELS = {
+    "morning": "Morning visit",
+    "later": "Later visit",
 }
 
 

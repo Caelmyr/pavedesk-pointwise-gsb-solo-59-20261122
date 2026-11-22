@@ -249,7 +249,7 @@ def thumbnail_stats(image):
     }
 
 
-def store_capture(blobs, data, role, filename, note, new_id, *, synthetic=False):
+def store_capture(blobs, data, role, filename, note, new_id, *, synthetic=False, visit=None):
     photo = decode_capture(data)
     stats = thumbnail_stats(photo.image)
     source_digest = blobs.put(data)
@@ -260,6 +260,7 @@ def store_capture(blobs, data, role, filename, note, new_id, *, synthetic=False)
     return {
         "id": new_id,
         "role": role,
+        "visit": visit,
         "name": safe_name(filename, "." + photo.format.lower()),
         "note": note,
         "format": photo.format,

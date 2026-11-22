@@ -9,6 +9,7 @@ from .geometry import (
     validate_polygon,
 )
 from .model import (
+    VISIT_LABELS,
     ConflictError,
     InputError,
     MAX_REGIONS,
@@ -32,6 +33,7 @@ from .store import make_id
 def describe_photo(photo, plane, registrations):
     info = {**photo}
     info["role_label"] = ROLE_LABELS[photo["role"]]
+    info["visit_label"] = VISIT_LABELS.get(photo.get("visit")) if photo.get("visit") else None
     info["diagnostics"] = diagnostic_flags(photo)
     is_base = plane is not None and plane["photo_id"] == photo["id"]
     info["registration_state"] = "base" if is_base else "registered" if photo["id"] in registrations else "unregistered"
@@ -89,14 +91,15 @@ def edit_specimen(store, identifier, payload):
     return store.edit_tile(identifier, version, change, "metadata", "Updated specimen details")
 
 
-def import_photo(store, tile_id, expected, binary, filename, role, note):
+def import_photo(store, tile_id, expected, binary, filename, role, note, visit=None):
     validated_role = enumeration(role, ROLE_LABELS, "Lighting role")
     validated_note = string(note, "Capture notes", maximum=500, required=False)
+    validated_visit = enumeration(visit, VISIT_LABELS, "Visit") if visit else None
     current = store.tile(tile_id)
     store.require_version(current, expected)
     if len(current["photos"]) >= MAX_TILE_IMAGES:
         raise InputError(f"A specimen supports at most {MAX_TILE_IMAGES} photographs.")
-    record = store_capture(store.blobs, binary, validated_role, filename, validated_note, make_id())
+    record = store_capture(store.blobs, binary, validated_role, filename, validated_note, make_id(), visit=validated_visit)
     if any(photo["source_digest"] == record["source_digest"] and photo["role"] == validated_role for photo in current["photos"]):
         raise InputError("This image is already on the specimen with the same lighting role.")
 
@@ -130,6 +133,9 @@ def edit_photo(store, tile_id, capture_id, payload):
             maximum=500,
             required=False,
         )
+        if "visit" in payload:
+            visit = payload.get("visit")
+            source["visit"] = enumeration(visit, VISIT_LABELS, "Visit") if visit else None
 
     return store.edit_tile(tile_id, expected, change, "capture", "Updated photo notes and lighting label")
 

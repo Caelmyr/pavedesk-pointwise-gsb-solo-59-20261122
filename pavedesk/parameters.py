@@ -1,4 +1,4 @@
-from .model import dictionary, enumeration, flag, identity, integer, numeric_pair, scalar
+from .model import VISIT_LABELS, InputError, dictionary, enumeration, flag, identity, integer, numeric_pair, scalar
 
 
 TOOLS = {
@@ -120,6 +120,18 @@ TOOLS.update({
         "minimum": {"kind": "integer", "label": "Minimum cluster px", "default": 4, "min": 1, "max": 800},
         "maximum": {"kind": "integer", "label": "Maximum cluster px", "default": 155, "min": 3, "max": 3500},
     }},
+    "moisture": {
+        "label": "Moisture recheck plan",
+        "description": "Cross-check the morning and later polarized pairs to draw the cleaning crew's wet-mark recheck range and area.",
+        "fields": {
+            "balance": {"kind": "choice", "label": "Exposure balance", "default": "auto", "choices": ["auto", "fixed"]},
+            "fixed_gain": {"kind": "number", "label": "Fixed gain", "default": 1, "min": 0.2, "max": 5, "step": 0.05},
+            "revisit_fraction": {"kind": "number", "label": "Wet signal fraction", "default": 0.3, "min": 0.04, "max": 0.9, "step": 0.02},
+            "paint_color_delta": {"kind": "number", "label": "Old paint ΔE cutoff", "default": 14, "min": 4, "max": 45, "step": 1},
+            "exclude_paint": {"kind": "flag", "label": "Exclude old-paint reflections", "default": True},
+            "minimum_island": {"kind": "integer", "label": "Minimum recheck island px", "default": 30, "min": 3, "max": 5000},
+        },
+    },
 })
 
 
@@ -143,9 +155,41 @@ def parsed_option(key, field, raw):
     raise RuntimeError(f"Unknown measurement option {key}.")
 
 
+def moisture_parameters(raw):
+    data = dictionary(raw, "Measurement")
+    raw_options = dictionary(data.get("options", {}), "Measurement options")
+    config = TOOLS["moisture"]
+    options = {
+        key: parsed_option(key, field, raw_options.get(key, field["default"]))
+        for key, field in config["fields"].items()
+    }
+    pairs = dictionary(data.get("visits", {}), "Polarization visits")
+    photo_ids = {}
+    for visit in VISIT_LABELS:
+        entry = dictionary(pairs.get(visit, {}), f"{VISIT_LABELS[visit]} pair")
+        photo_ids[visit] = {
+            "parallel": identity(entry["parallel"], f"{VISIT_LABELS[visit]} parallel photo"),
+            "cross": identity(entry["cross"], f"{VISIT_LABELS[visit]} cross photo"),
+        }
+    distinct = {pid for pair in photo_ids.values() for pid in pair.values()}
+    if len(distinct) != 4:
+        raise InputError("Select four distinct captures: a parallel and cross photo for each of the two visits.")
+    return {
+        "kind": "moisture",
+        "options": options,
+        "region_id": identity(raw["region_id"], "Sampling region") if raw.get("region_id") else None,
+        "photo_id": None,
+        "comparison_id": None,
+        "apply_neutral": False,
+        "visits": photo_ids,
+    }
+
+
 def analysis_parameters(payload):
     raw = dictionary(payload, "Measurement")
     kind = enumeration(raw.get("kind"), TOOLS, "Measurement mode")
+    if kind == "moisture":
+        return moisture_parameters(raw)
     raw_options = dictionary(raw.get("options", {}), "Measurement options")
     config = TOOLS[kind]
     options = {

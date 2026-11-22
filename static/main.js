@@ -56,7 +56,7 @@ function collection() {
   return `<section class="hero"><div class="hero-text">
       <h1>Inspect the pavement.</h1>
       <p>Register road and forecourt photos, compare surface marks, and keep the source evidence for follow-up work.</p>
-      <div class="actions">${btn(state.tiles.some(record=>record.synthetic)?"Open training surveys":"Load training surveys","training","light","sample")}${btn("Add a specimen","tile-new","secondary","plus")}</div>
+      <div class="actions">${btn(state.tiles.some(record=>record.synthetic)?"Open training surveys":"Load training surveys","training","light","sample")}${btn("Load two-visit moisture demo","moisture-training","light","sample")}${btn("Add a specimen","tile-new","secondary","plus")}</div>
       </div><figure class="hero-image">${img("/api/training/hero.png","Synthetic asphalt survey image showing a worn yellow marking and a prior repair")}<figcaption class="hero-caption">Juniper crossing · Synthetic training photo</figcaption></figure></section>
     <div class="section-head"><div><h2>Surface surveys</h2><p>${state.tiles.length} ${state.tiles.length===1?"specimen":"specimens"}</p></div><label class="filter">${icon("search")}<input id="tile-search" placeholder="Search surfaces" aria-label="Search surfaces" value="${e(state.query)}"></label></div>
     <div id="tile-list">${cardTiles()}</div>`;
@@ -98,7 +98,7 @@ function captureSide() {
   const tile=state.tile;
   const selected=currentPhoto();
   const rows=tile.photos.map(item=>`<div class="row">${img(item.thumbnail_url,"", 'class="item-image"')}
-    <div class="grow"><span class="row-title">${e(item.role_label)}</span><small>${e(item.registration_state)} · ${item.width} × ${item.height}</small></div>
+    <div class="grow"><span class="row-title">${e(item.role_label)}${item.visit_label?` · ${e(item.visit_label)}`:""}</span><small>${e(item.registration_state)} · ${item.width} × ${item.height}</small></div>
     ${btn("View","photo-view",selected?.id===item.id?"tiny primary":"tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("");
   const listed=selected?selected.diagnostics.map(value=>`<li>${e(value)}</li>`).join(""):"";
   return `<div class="stack"><section class="card"><div class="title-row"><h3>Capture set</h3>${btn("Add photo","photo-add","tiny secondary","plus")}</div>
@@ -138,7 +138,39 @@ function optionInput(key,item) {
   return "";
 }
 
+function moisturePhotoOptions(visit,role) {
+  const ready=state.tile.photos.filter(item=>item.registered_url && item.role===role);
+  const groups={morning:[],later:[]};
+  ready.forEach(item=>(groups[item.visit||"morning"]||[]).push(item));
+  const label={morning:"早组（Morning）",later:"晚组（Later）"};
+  const pick=list=>list.length
+    ? list.map(item=>option(item.id,`${item.role_label} · ${item.name}`,null)).join("")
+    : "";
+  return option("","请选择照片","")+
+    Object.entries(groups).filter(([,list])=>list.length)
+      .map(([v,list])=>`<optgroup label="${e(label[v])}">${pick(list)}</optgroup>`).join("");
+}
+
+function moistureControls() {
+  const tool=state.config.tools.moisture;
+  const pair=(visit,title)=>`<fieldset class="visit-pair"><legend>${e(title)}</legend>
+    <div class="form-columns">
+      ${selectField("顺偏 Parallel（"+visit+"）",`visit_${visit}_parallel`,moisturePhotoOptions(visit,"parallel"))}
+      ${selectField("交偏 Cross（"+visit+"）",`visit_${visit}_cross`,moisturePhotoOptions(visit,"cross"))}
+    </div></fieldset>`;
+  return `<form id="measurement-form" class="form-stack">
+    ${selectField("Measurement","kind",Object.entries(state.config.tools).map(([name,item])=>option(name,item.label,"moisture")).join(""))}
+    <p class="soft">${e(tool.description)}</p>
+    ${pair("morning","早组 Morning visit（含右角返潮热斑）")}
+    ${pair("later","晚组 Later visit（右角漏拍）")}
+    ${selectField("Region","region_id",regions())}
+    <div class="form-columns">${Object.entries(tool.fields).map(([key,item])=>optionInput(key,item)).join("")}</div>
+    <button class="button primary" type="submit">${icon("measure")}生成湿痕复查范围</button>
+  </form>`;
+}
+
 function measureControls() {
+  if (state.tool==="moisture") return moistureControls();
   const tool=state.config.tools[state.tool];
   const all=state.tile.photos.filter(item=>item.registered_url);
   const match=field=>sources(tool.capture_pair?all.filter(item=>item.role===tool.capture_pair[field]):all,null,tool.capture_pair?"Auto if unique":"Base capture");
@@ -366,15 +398,19 @@ function tileForm(existing) {
 
 function captureForm(photo) {
   const available=Object.entries(state.config.photo_roles).map(([key,label])=>option(key,label,photo?.role||"diffuse")).join("");
+  const visitChoices=option("","Unspecified visit","")+option("morning","Morning visit (早组)",photo?.visit||"")+option("later","Later visit (晚组)",photo?.visit||"");
   modal(photo?"Edit capture":"Add a capture",`
     ${photo?"":field("Photo","photo",'<input id="field-photo" name="photo" type="file" accept="image/png,image/jpeg,image/tiff,image/webp,.tif,.tiff" required>')}
-    ${selectField("Lighting role","role",available)}${areaField("Capture notes","note",photo?.note,500)}
+    ${selectField("Lighting role","role",available)}
+    ${selectField("Visit group (two-visit moisture)","visit",visitChoices)}
+    ${areaField("Capture notes","note",photo?.note,500)}
     ${photo?"":'<p class="soft">PNG, JPEG, WebP, or single-frame TIFF up to 24 MiB. The original is retained.</p>'}`,
     photo?"Save capture":"Import photo",async data=>{
       if (photo) {
         await patchTile("/photos/"+photo.id,"PATCH",plainData(data),"Capture updated.");
         return;
       }
+      if (!data.get("visit")) data.set("visit","");
       data.set("version",state.tile.version);
       const updated=await api(tileUrl()+"/photos",{method:"POST",body:data});
       state.tile=updated;
@@ -635,11 +671,30 @@ function parsedOptions(data,tool) {
 
 async function runMeasurement(data) {
   const revision=travel;
-  const result=await api(tileUrl()+"/results",{method:"POST",body:{
-    kind:state.tool,photo_id:data.get("photo_id")||null,comparison_id:data.get("comparison_id")||null,
-    region_id:data.get("region_id")||null,apply_neutral:data.has("apply_neutral"),
-    options:parsedOptions(data,state.config.tools[state.tool]),
-  }});
+  let body;
+  if (state.tool==="moisture") {
+    const visits={};
+    for (const visit of ["morning","later"]) {
+      visits[visit]={
+        parallel:data.get(`visit_${visit}_parallel`),
+        cross:data.get(`visit_${visit}_cross`),
+      };
+      if (!visits[visit].parallel || !visits[visit].cross) {
+        throw Error("为早晚两组各选择顺偏和交偏照片。");
+      }
+    }
+    body={
+      kind:"moisture",region_id:data.get("region_id")||null,visits,
+      options:parsedOptions(data,state.config.tools.moisture),
+    };
+  } else {
+    body={
+      kind:state.tool,photo_id:data.get("photo_id")||null,comparison_id:data.get("comparison_id")||null,
+      region_id:data.get("region_id")||null,apply_neutral:data.has("apply_neutral"),
+      options:parsedOptions(data,state.config.tools[state.tool]),
+    };
+  }
+  const result=await api(tileUrl()+"/results",{method:"POST",body});
   if (revision!==travel) return;
   state.result=result;
   state.layer="overlay";
@@ -660,6 +715,11 @@ async function doAction(name,target) {
         render();
         toast("Four synthetic training specimens are ready.");
       }
+    },
+    "moisture-training":async ()=>{
+      const rows=await api("/api/training/moisture",{method:"POST",body:{}});
+      location.hash="tile:"+rows.items[0].id;
+      toast("Two-visit moisture demo ready. Open Measure → Moisture recheck plan.");
     },
     "tile-open":()=>{location.hash="tile:"+id;},
     "tile-new":()=>tileForm(),
