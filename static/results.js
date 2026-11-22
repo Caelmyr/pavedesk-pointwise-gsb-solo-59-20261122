@@ -19,6 +19,13 @@ export function metricSet(record) {
     rim: () => [["Rim median ΔE",n(m.all_edges.median_from_center_delta_e)],["Rim pixels",n(m.all_edges.pixels,0)],["Interior L*",n(m.interior.median_lab[0])]],
     profile: () => [["Distance",`${n(m.line_length)} ${m.distance_unit}`],["Valid stations",`${m.supported_stations}/${m.requested_stations}`],["Median L*",n(m.features.median_lightness)]],
     reference: () => [["Specimen to reference ΔE",n(m.delta_e76)],["Lightness difference",n(m.delta_lab[0])],["Dispersion difference",n(m.dispersion_delta)]],
+    seam: () => {
+      const rows=[["Comparable edges",`${m.comparable_ends}/${m.total_ends}`],["Shared neutral target",n(m.shared_target,3)]];
+      for (const end of m.ends) {
+        rows.push([end.edge_label, end.comparable ? `ΔE ${n(end.delta_e76)}` : "Not comparable"]);
+      }
+      return rows;
+    },
     marking: () => [["Measured stations",percent(m.observed_percent)],["Paint among measured",percent(m.paint_percent_of_observed)],["Runs",m.runs.length]],
     joint: () => [["Measured stations",m.measured_stations],["Unmeasured stations",m.unmeasured_stations],["Median absolute contrast",n(m.median_absolute_step,4)]],
     aggregate: () => [["Bright clusters",m.candidate_clusters],["Supported pixels",m.observed_pixels],["Bright fraction",percent(m.bright_fraction_of_support)]],
@@ -117,10 +124,36 @@ function referenceDetail(m) {
     <p class="notice">${e(m.capture_note)}</p>`;
 }
 
+function seamDetail(m) {
+  const row=end=>{
+    const card=end.card_check;
+    const limit=n(card.tolerance_percent,1);
+    const status=end.comparable
+      ? badge("Comparable · ΔE "+n(end.delta_e76),"ready")
+      : badge("Card color not comparable","caution");
+    const colorRow=end.comparable
+      ? `<div class="metrics">${stat("Current edge",end.observed_swatch)}${stat("Approved edge",end.reference_swatch)}${stat("ΔE76",n(end.delta_e76))}</div>`
+      : `<p class="notice">${e(end.note)}</p>`;
+    return `<tr>
+      <td><strong>${e(end.edge_label)}</strong><br><small>${status}</small></td>
+      <td>${n(card.red_deviation_percent,2)}% / ${n(card.blue_deviation_percent,2)}%<br><small>red/blue vs green · limit ${limit}%</small></td>
+      <td>${colorRow}</td>
+    </tr>`;
+  };
+  return `<h3>Seam edges under one shared calibration</h3>
+    <p class="plot-note">${e(m.calibration_note)}</p>
+    <div class="table-wrap"><table><thead><tr><th>Seam edge</th><th>Grey-card channel deviation</th><th>Reference comparison</th></tr></thead>
+      <tbody>${m.ends.map(row).join("")}</tbody></table></div>
+    <details><summary>Grey-card gain records</summary>${table(
+      ["Edge","Red gain","Green gain","Blue gain","Card samples"],
+      m.ends.map(end=>[end.edge_label,...end.observed_card.gains.map(value=>n(value,4)),n(end.observed_card.card_samples,0)])
+    )}</details>`;
+}
+
 function details(record) {
   const render = {
     color:colorDetail,coverage:coverageDetail,defects:defectsDetail,glare:glareDetail,
-    direction:directionDetail,texture:textureDetail,profile:profileDetail,reference:referenceDetail,craze:crazeDetail,rim:rimDetail,
+    direction:directionDetail,texture:textureDetail,profile:profileDetail,reference:referenceDetail,seam:seamDetail,craze:crazeDetail,rim:rimDetail,
     marking:markingDetail,joint:jointDetail,aggregate:aggregateDetail,
   }[record.kind];
   return render(record.kind==="defects" ? record : record.metrics);

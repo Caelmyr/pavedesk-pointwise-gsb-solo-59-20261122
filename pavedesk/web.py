@@ -6,8 +6,9 @@ from threading import BoundedSemaphore
 from flask import Blueprint, Flask, Response, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 
-from .analysis import approve_reference, evaluate
+from .analysis import approve_reference, approve_seam, evaluate
 from .demo import load_training, preview_photo
+from .seam_demo import load_seam_training
 from .evidence import (
     artifact_json,
     create_evidence,
@@ -296,6 +297,12 @@ def register_measurements(api, store, heavy):
             ref = approve_reference(store, json_request())
         return jsonify(ref), 201
 
+    @api.post("/library/seam")
+    def seam_reference_save():
+        with heavy:
+            ref = approve_seam(store, json_request())
+        return jsonify(ref), 201
+
     @api.post("/library/<reference_id>/retire")
     def reference_retire(reference_id):
         version = model_version(json_request())
@@ -436,6 +443,12 @@ def register_training(api, store, heavy):
     def training():
         with heavy:
             tiles, created = load_training(store)
+        return jsonify({"items": [summarize_tile(tile) for tile in tiles], "created": created}), 201 if created else 200
+
+    @api.post("/training/seam")
+    def seam_training():
+        with heavy:
+            tiles, created = load_seam_training(store)
         return jsonify({"items": [summarize_tile(tile) for tile in tiles], "created": created}), 201 if created else 200
 
 

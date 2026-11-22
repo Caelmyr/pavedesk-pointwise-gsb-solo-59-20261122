@@ -56,7 +56,7 @@ function collection() {
   return `<section class="hero"><div class="hero-text">
       <h1>Inspect the pavement.</h1>
       <p>Register road and forecourt photos, compare surface marks, and keep the source evidence for follow-up work.</p>
-      <div class="actions">${btn(state.tiles.some(record=>record.synthetic)?"Open training surveys":"Load training surveys","training","light","sample")}${btn("Add a specimen","tile-new","secondary","plus")}</div>
+      <div class="actions">${btn(state.tiles.some(record=>record.synthetic)?"Open training surveys":"Load training surveys","training","light","sample")}${btn("Repair seam example","seam-training","light","compare")}${btn("Add a specimen","tile-new","secondary","plus")}</div>
       </div><figure class="hero-image">${img("/api/training/hero.png","Synthetic asphalt survey image showing a worn yellow marking and a prior repair")}<figcaption class="hero-caption">Juniper crossing · Synthetic training photo</figcaption></figure></section>
     <div class="section-head"><div><h2>Surface surveys</h2><p>${state.tiles.length} ${state.tiles.length===1?"specimen":"specimens"}</p></div><label class="filter">${icon("search")}<input id="tile-search" placeholder="Search surfaces" aria-label="Search surfaces" value="${e(state.query)}"></label></div>
     <div id="tile-list">${cardTiles()}</div>`;
@@ -132,14 +132,72 @@ function optionInput(key,item) {
   if (kind==="choice") return selectField(label,key,item.choices.map(choice=>option(choice,choice,value)).join(""));
   if (kind==="flag") return checkField(label,key,value);
   if (kind==="region") return selectField(label,key,option("","Auto / current area","")+state.tile.regions.filter(record=>item.purpose?record.purpose===item.purpose:record.purpose!=="ignore").map(record=>option(record.id,record.name)).join(""));
-  if (kind==="reference") return selectField(label,key,option("","Choose a reference","")+state.refs.map(record=>option(record.id,record.title)).join(""));
+  if (kind==="reference") {
+    const refs = state.tool==="seam" ? state.refs.filter(record=>record.kind==="seam") : state.refs;
+    return selectField(label,key,option("","Choose a reference","")+refs.map(record=>option(record.id,record.title)).join(""));
+  }
+  if (kind==="photo") {
+    const ready=state.tile.photos.filter(item=>item.registered_url);
+    return selectField(label,key,option("","Choose a registered capture","")+ready.map(record=>option(record.id,record.role_label+" · "+record.name)).join(""));
+  }
   if (kind==="point") return `<div class="field"><span>${e(label)} (X, Y)</span><div class="point-group">
     ${value.map((coordinate,index)=>`<input name="${key}-${index}" aria-label="${e(label)} ${index===0?"X":"Y"}" type="number" min="0" max="1" step=".001" value="${coordinate}">`).join("")}</div></div>`;
   return "";
 }
 
+function seamPhotoChoices(selected) {
+  const ready=state.tile.photos.filter(item=>item.registered_url);
+  return option("","Choose a registered capture",selected)
+    +ready.map(item=>option(item.id,item.role_label+" · "+item.name,selected)).join("");
+}
+
+function seamRegionChoices(purpose,selected) {
+  const choices=state.tile.regions.filter(item=> purpose
+    ? item.purpose===purpose
+    : (item.purpose!=="ignore" && item.purpose!=="neutral"));
+  return option("","Choose a region",selected)+choices.map(item=>option(item.id,item.name,selected)).join("");
+}
+
+function seamReferenceChoices(selected) {
+  const seam=state.refs.filter(item=>item.kind==="seam");
+  const chosen=selected ?? state.pendingSeamRef ?? "";
+  return option("","Choose an approved seam reference",chosen)
+    +seam.map(item=>option(item.id,item.title,chosen)).join("");
+}
+
+function seamFormControls() {
+  const refs=state.refs.filter(item=>item.kind==="seam");
+  return `<p class="soft">One shared neutral target calibrates both grey cards. The two ends are never pulled toward each other, so a real color change at the seam stays visible. An end whose red or blue gain departs more than 5% from green stays marked not comparable and gets no color difference.</p>
+    <div class="form-columns">
+      ${selectField("Approved seam reference","reference_id",seamReferenceChoices(""))}
+      ${numField("Shared neutral target","target",0.18,0.08,0.8,0.01)}
+    </div>
+    <h4 class="form-subhead">Existing paving edge · warm lamp view</h4>
+    <div class="form-columns">
+      ${selectField("Old-end capture","old_photo_id",seamPhotoChoices(""))}
+      ${selectField("Old-end grey card","old_card_region_id",seamRegionChoices("neutral",""))}
+      ${selectField("Old-material seam edge","old_edge_region_id",seamRegionChoices(null,""))}
+    </div>
+    <h4 class="form-subhead">Repair fill edge · window light view</h4>
+    <div class="form-columns">
+      ${selectField("New-end capture","new_photo_id",seamPhotoChoices(""))}
+      ${selectField("New-end grey card","new_card_region_id",seamRegionChoices("neutral",""))}
+      ${selectField("New-fill seam edge","new_edge_region_id",seamRegionChoices(null,""))}
+    </div>
+    <div class="actions">${btn("Approve as seam reference","seam-approve","secondary","book")}
+      ${refs.length?btn("Run reference match","seam-run","primary","measure"):""}</div>
+    ${refs.length?"<p class='soft'>Approve once to create the library sample, then select it and run a match to re-check both edges later.</p>":""}`;
+}
+
 function measureControls() {
   const tool=state.config.tools[state.tool];
+  if (state.tool==="seam") {
+    return `<form id="measurement-form" class="form-stack">
+      ${selectField("Measurement","kind",Object.entries(state.config.tools).map(([name,item])=>option(name,item.label,state.tool)).join(""))}
+      <p class="soft">${e(tool.description)}</p>
+      ${seamFormControls()}
+    </form>`;
+  }
   const all=state.tile.photos.filter(item=>item.registered_url);
   const match=field=>sources(tool.capture_pair?all.filter(item=>item.role===tool.capture_pair[field]):all,null,tool.capture_pair?"Auto if unique":"Base capture");
   return `<form id="measurement-form" class="form-stack">
@@ -221,9 +279,19 @@ function tilePage() {
 function libraryPage() {
   const items=state.refs;
   return `<header class="page-head"><div><h1>Reference library</h1><p>Approved color samples retain their capture, region, and neutral-card basis.</p></div></header>
-    ${items.length?`<div class="collection">${items.map(ref=>`<article class="card stack">${img(`/api/library/${ref.id}/image`,ref.title,'loading="lazy"')}
-    <h3>${e(ref.title)}</h3><p>${e(ref.family || ref.specimen.name)} · ${e(ref.fingerprint.swatch)}</p>
-    <div class="actions">${link("Open specimen","#tile:"+ref.tile_id,"secondary","tiles")}${btn("Retire","reference-retire","ghost",null,`data-id="${ref.id}"`)}</div></article>`).join("")}</div>`:empty("Approve a visual reference from a specimen with a registered capture.",link("Open specimens","#collection","primary","tiles"))}`;
+    ${items.length?`<div class="collection">${items.map(ref=>{
+      const seam = ref.kind==="seam";
+      const seamBadge = seam ? (()=>{
+        const ok=ref.ends.filter(end=>end.card.card_neutrality.comparable).length;
+        return badge(`Seam sample · ${ok}/${ref.ends.length} edges comparable`,ok===ref.ends.length?"ready":"caution");
+      })() : "";
+      const swatchLine = seam
+        ? ref.ends.map(end=>{const c=end.card.card_neutrality; return dots(`${end.edge_label} · ${c.comparable?"comparable":"not comparable"}`, end.edge.fingerprint.swatch);}).join(" ")
+        : e(ref.family || ref.specimen.name)+" · "+e(ref.fingerprint.swatch);
+      return `<article class="card stack">${img(`/api/library/${ref.id}/image`,ref.title,'loading="lazy"')}
+    <h3>${e(ref.title)}</h3>${seamBadge}<p>${swatchLine}</p>
+    <div class="actions">${link("Open specimen","#tile:"+ref.tile_id,"secondary","tiles")}${btn("Retire","reference-retire","ghost",null,`data-id="${ref.id}"`)}</div></article>`;
+    }).join("")}</div>`:empty("Approve a visual reference from a specimen with a registered capture.",link("Open specimens","#collection","primary","tiles"))}`;
 }
 
 function studyPanel() {
@@ -479,6 +547,34 @@ function neutralForm() {
     "Save balance",async data=>patchTile("/calibration","PUT",parseDatesAndNumbers(data,["target"]),"Neutral-card balance saved."));
 }
 
+function seamApproveForm() {
+  const form=q("#measurement-form");
+  if (!form) throw Error("Open the repair seam color match measurement first.");
+  const required=["old_photo_id","old_card_region_id","old_edge_region_id","new_photo_id","new_card_region_id","new_edge_region_id"];
+  const values=Object.fromEntries(new FormData(form).entries());
+  const missing=required.filter(key=>!values[key]);
+  if (missing.length) throw Error("Choose both captures, both grey cards and both seam edges before approving.");
+  modal("Approve seam reference",`
+    ${textField("Reference name","title",state.tile.name+" repair seam",'required maxlength="100"')}
+    ${textField("Reference series","family",state.tile.batch||"",'maxlength="100"')}
+    ${areaField("Notes","notes","",1200)}
+    <p class="notice">The two calibrated views and the 5% grey-card comparability decision are frozen with this reference. An end that fails stays flagged as not comparable in every later match.</p>`,
+    "Approve seam reference",async data=>{
+      const body={
+        tile_id:state.tile.id,
+        title:data.get("title"),family:data.get("family"),notes:data.get("notes"),
+        target:Number(values.target),
+        ...Object.fromEntries(required.map(key=>[key,values[key]])),
+      };
+      const ref=await api("/api/library/seam",{method:"POST",body});
+      state.pendingSeamRef=ref.id;
+      await gatherTile();
+      commitModal();
+      toast("Seam reference approved. The non-comparable end stays flagged in future matches.");
+      render();
+    });
+}
+
 function refForm() {
   if (!state.tile.plane) throw Error("Add a specimen photo before approving a reference.");
   modal("Approve visual reference",`${textField("Reference name","title",state.tile.name,'required maxlength="100"')}
@@ -700,6 +796,13 @@ async function doAction(name,target) {
     neutral:neutralForm,
     "neutral-clear":()=>patchTile("/calibration","DELETE",{},"Neutral-card balance cleared."),
     "reference-add":refForm,
+    "seam-approve":seamApproveForm,
+    "seam-run":()=>q("#measurement-form")?.requestSubmit(),
+    "seam-training":async ()=>{
+      const rows=await api("/api/training/seam",{method:"POST",body:{}});
+      location.hash="tile:"+rows.items[0].id;
+      toast("Repair seam training specimen loaded.");
+    },
     "reference-retire":()=>{
       const ref=state.refs.find(item=>item.id===id);
       modal("Retire visual reference?",'<p>Earlier measurements keep the approved sample they used.</p>',"Retire reference",async ()=>{

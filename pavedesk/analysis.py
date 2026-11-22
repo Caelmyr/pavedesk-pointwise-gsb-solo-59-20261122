@@ -23,6 +23,7 @@ from .coverage import measure_coverage
 from .defects import measure_defects
 from .craze import measure_craze
 from .rim import measure_rim
+from .seam import approve_seam_reference, seam_match
 from .geometry import active_region, analysis_mask, region_domain, specimen_frame
 from .lighting import measure_direction, measure_glare
 from .model import ANALYSIS_LABELS, InputError, library_fields
@@ -127,6 +128,94 @@ def approve_reference(store, payload):
     return store.add_reference({**fields, **reference})
 
 
+def approve_seam(store, payload):
+    fields = library_fields(payload)
+    tile = store.tile(fields["tile_id"])
+    return approve_seam_reference(store, tile, payload)
+
+
+def seam_result_document(store, tile, params, metrics, panel, assembled, reference, cache_key):
+    cards = {item["end"].key: item["card"] for item in assembled}
+    result = {
+        "tile_id": tile["id"],
+        "source_version": tile["version"],
+        "kind": "seam",
+        "label": ANALYSIS_LABELS["seam"],
+        "parameters": params,
+        "metrics": metrics,
+        "legend": None,
+        "basis": {
+            "photo_role": "seam-pair",
+            "synthetic": bool(tile.get("synthetic")),
+            "neutral_target": metrics["shared_target"],
+            "source_space": "shared grey-card calibration",
+            "tile_id": tile["id"],
+        },
+        "support": {
+            "registered_image_extent": list(assembled[0]["frame"].extent),
+            "requested_pixels": sum(item["edge"]["supported_pixels"] for item in assembled),
+            "available_pixels": sum(item["edge"]["supported_pixels"] for item in assembled),
+            "clipped_pixels": sum(item["edge"]["clipped_pixels"] for item in assembled),
+            "available_percent": round(
+                100
+                * sum(item["edge"]["supported_pixels"] for item in assembled)
+                / max(sum(item["edge"]["supported_pixels"] + item["edge"]["clipped_pixels"] for item in assembled), 1),
+                2,
+            ),
+            "calibrated_area_mm2": None,
+        },
+        "provenance": {
+            "analyzer_version": ANALYZER_VERSION,
+            "specimen": specimen_provenance(tile),
+            "photo": capture_provenance(assembled[0]["frame"]),
+            "paired_photo": capture_provenance(assembled[1]["frame"]),
+            "region": None,
+            "exclusions": [item for item in tile["regions"] if item["purpose"] == "ignore"],
+            "neutral_card": cards[assembled[0]["end"].key],
+            "seam_cards": [public_seam_card(item["card"]) for item in assembled],
+            "reference": {
+                "id": reference["id"],
+                "version": reference["version"],
+                "title": reference["title"],
+                "kind": reference.get("kind", "seam"),
+            }
+            if reference
+            else None,
+        },
+        "pictures": {
+            "source": stored_preview(base_rgba(assembled[0]["frame"]), store.blobs),
+            "overlay": stored_preview(panel, store.blobs),
+            "paired": stored_preview(base_rgba(assembled[1]["frame"]), store.blobs),
+        },
+    }
+    return store.save_result(cache_key, result)
+
+
+def public_seam_card(card):
+    from .seam import public_card
+
+    return public_card(card)
+
+
+def evaluate_seam(store, tile, params, reference, cache_key):
+    options = params["options"]
+    payload = {
+        "target": options["target"],
+        "old_photo_id": options["old_photo_id"],
+        "old_card_region_id": options["old_card_region_id"],
+        "old_edge_region_id": options["old_edge_region_id"],
+        "new_photo_id": options["new_photo_id"],
+        "new_card_region_id": options["new_card_region_id"],
+        "new_edge_region_id": options["new_edge_region_id"],
+    }
+    if not reference:
+        raise InputError(
+            "Approve this seam as a library reference first, then select it in the repair seam color match."
+        )
+    metrics, panel, assembled = seam_match(store, tile, reference, payload)
+    return seam_result_document(store, tile, params, metrics, panel, assembled, reference, cache_key)
+
+
 def resolve_parameters(store, tile, payload):
     params = analysis_parameters(payload)
     kind = params["kind"]
@@ -141,6 +230,14 @@ def resolve_parameters(store, tile, payload):
         reference = store.reference(params["options"]["reference_id"])
         if reference["retired"]:
             raise InputError("The selected reference has been retired.")
+    if kind == "seam":
+        reference_id = params["options"].get("reference_id")
+        if reference_id:
+            reference = store.reference(reference_id)
+            if reference["retired"]:
+                raise InputError("The selected reference has been retired.")
+            if reference.get("kind") != "seam":
+                raise InputError("Choose a repair seam reference for this measurement.")
     if kind == "defects" and params["options"]["maximum_area"] <= params["options"]["minimum_area"]:
         raise InputError("Maximum spot size must exceed the minimum.")
     return params, reference
@@ -252,6 +349,8 @@ def evaluate(store, tile_id, payload):
     cached = store.get_cached_result(cache_key)
     if cached:
         return cached
+    if params["kind"] == "seam":
+        return evaluate_seam(store, tile, params, reference, cache_key)
     frame = specimen_frame(store.blobs, tile, params["photo_id"])
     region = active_region(tile, params["region_id"])
     area = region_domain(frame.extent, tile, region)

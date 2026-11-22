@@ -337,13 +337,21 @@ class Store:
 
     def add_reference(self, fields):
         now = timestamp()
-        ref = {**fields, "id": make_id(), "retired": False, "version": 1, "created_at": now}
+        ref = {
+            **fields,
+            "id": make_id(),
+            "retired": False,
+            "version": 1,
+            "created_at": now,
+            "kind": fields.get("kind", "color"),
+        }
         with self.transaction(write=True) as conn:
             conn.execute(
                 "INSERT INTO library(id,tile_id,document,updated_at) VALUES (?,?,?,?)",
                 (ref["id"], ref["tile_id"], document(ref), now),
             )
-            event(conn, ref["tile_id"], "reference", f"Approved visual reference: {ref['title']}")
+            label = "seam reference" if ref["kind"] == "seam" else "visual reference"
+            event(conn, ref["tile_id"], "reference", f"Approved {label}: {ref['title']}")
         return ref
 
     def retire_reference(self, identifier, expected_version):

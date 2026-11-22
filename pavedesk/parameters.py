@@ -101,6 +101,20 @@ TOOLS = {
             "reference_id": {"kind": "reference", "label": "Approved visual reference", "default": None},
         },
     },
+    "seam": {
+        "label": "Repair seam color match",
+        "description": "Approve or re-check both seam edges under one shared grey-card calibration.",
+        "fields": {
+            "reference_id": {"kind": "reference", "label": "Approved seam reference (leave empty to approve)", "default": None},
+            "target": {"kind": "number", "label": "Shared neutral target", "default": 0.18, "min": 0.08, "max": 0.8, "step": 0.01},
+            "old_photo_id": {"kind": "photo", "label": "Existing-paving capture (warm lamp)", "default": None},
+            "old_card_region_id": {"kind": "region", "purpose": "neutral", "label": "Old-end grey card", "default": None},
+            "old_edge_region_id": {"kind": "region", "label": "Old-material seam edge", "default": None},
+            "new_photo_id": {"kind": "photo", "label": "Repair-fill capture (window light)", "default": None},
+            "new_card_region_id": {"kind": "region", "purpose": "neutral", "label": "New-end grey card", "default": None},
+            "new_edge_region_id": {"kind": "region", "label": "New-fill seam edge", "default": None},
+        },
+    },
 }
 
 
@@ -139,7 +153,9 @@ def parsed_option(key, field, raw):
     if kind == "region":
         return identity(raw, label) if raw else None
     if kind == "reference":
-        return identity(raw, label)
+        return identity(raw, label) if raw else None
+    if kind == "photo":
+        return identity(raw, label) if raw else None
     raise RuntimeError(f"Unknown measurement option {key}.")
 
 

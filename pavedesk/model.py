@@ -30,6 +30,8 @@ ROLE_LABELS = {
     "rake-left": "Raking light from left",
     "rake-right": "Raking light from right",
     "reference": "Reference capture",
+    "warm": "Warm lamp view",
+    "daylight": "Window daylight view",
 }
 REGION_PURPOSES = {
     "inspection": "Inspection area",
@@ -48,6 +50,7 @@ ANALYSIS_LABELS = {
     "craze": "Surface fissures",
     "rim": "Survey margin color",
     "reference": "Reference match",
+    "seam": "Repair seam color match",
     "direction": "Raking light comparison",
     "marking": "Marking wear scan",
     "joint": "Repair seam scan",

@@ -288,6 +288,7 @@ def summarize_result(record):
         "rim": ("all_edges", "rim_band_pixels"),
         "profile": ("line_length", "distance_unit", "supported_stations"),
         "reference": ("reference_title", "delta_e76"),
+        "seam": ("reference_title", "comparable_ends", "shared_target"),
         "direction": ("left_strong_percent", "right_strong_percent"),
         "marking": ("observed_percent", "paint_percent_of_observed", "stations"),
         "joint": ("measured_stations", "unmeasured_stations", "median_absolute_step"),
