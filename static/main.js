@@ -166,6 +166,16 @@ function evidencePage() {
     <section class="card"><h3>Specimen activity</h3><div class="divider-list scroll-list">${(state.activity||[]).map(row=>`<div class="row"><div class="grow"><strong>${e(row.message)}</strong><br><small>${e(date(row.recorded_at))}</small></div></div>`).join("")}</div></section></div>`;
 }
 
+function openingSummary(opening) {
+  const leftOut=opening.left_out.length?opening.left_out.join(", "):"none";
+  return `<div class="metrics">
+    ${stat("Template",opening.template_mm.map(value=>n(value,0)).join(" × ")+" mm")}
+    ${stat("Loose area covered",percent(opening.loose.covered_percent))}
+    ${stat("Deepest enclosed",opening.deepest.enclosed?"Yes":"No")}</div>
+  <p class="notice">Left outside at adoption: ${e(leftOut)}.</p>
+  ${table(["Block","Covered","Status"],opening.loose.blocks.map(item=>[item.name,percent(item.covered_percent),item.status]))}`;
+}
+
 function geometryPage() {
   const record=state.metrologyActive;
   const results=state.metrology||[];
@@ -181,12 +191,13 @@ function geometryPage() {
     report=`<section class="card stack"><h3>${e(record.title)}</h3>
       <figure class="stage">${img(base+"/overlay.png",record.title)}</figure>
       <div class="metrics">${stats.map(([name,value])=>stat(name,value)).join("")}</div>
+      ${record.opening?openingSummary(record.opening):""}
       ${table(["Segment","Length","Heading"],stations.map(item=>[item.index,`${n(item.length)} ${item.units}`,n(item.clockwise_heading)+"°"]))}
       <div class="actions">${link("Measurement JSON",base+"/data.json","secondary","download")}</div></section>`;
   }
   return `<div class="grid-detail">${report}<div class="stack"><section class="card"><h3>Measure a visible shape</h3>
       <p class="soft">Trace along the image or measure visible support inside a saved sampling region.</p>
-      <div class="actions">${btn("Trace a path","trace-add","primary","measure")}${btn("Measure region area","area-add","secondary","frame")}</div></section>
+      <div class="actions">${btn("Trace a path","trace-add","primary","measure")}${btn("Measure region area","area-add","secondary","frame")}${btn("Plan repair opening","opening-add","secondary","sample")}</div></section>
       <section class="card"><h3>Saved geometry</h3><div class="divider-list">${results.map(item=>`<div class="row"><div class="grow">${e(item.title)}<br><small>${e(item.mode)} · revision ${item.specimen.version}</small></div>${btn("Open","metrology-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")||"<p class='soft'>No saved outlines.</p>"}</div></section></div></div>`;
 }
 
@@ -535,6 +546,51 @@ function geometryMeasurementForm(mode) {
   if (!area) prepareDrawing([],45);
 }
 
+function openingPayload(data) {
+  return {
+    version:state.tile.version,
+    title:data.get("title"),
+    template_w:Number(data.get("template_w")),
+    template_h:Number(data.get("template_h")),
+    block_ids:data.getAll("block_id"),
+    deepest_id:data.get("deepest_id"),
+    passage_id:data.get("passage_id"),
+  };
+}
+
+function openingForm() {
+  const tile=state.tile;
+  if (!tile.plane) throw Error("Set a base photo and mark the survey plane first.");
+  if (!(tile.width_mm&&tile.height_mm)) throw Error("Enter the specimen dimensions in millimetres first (Edit specimen).");
+  if (tile.regions.length<2) throw Error("Draw the loose blocks and the keep-clear passage as sampling regions first.");
+  const boxes=tile.regions.map(item=>`<label class="field check row"><input type="checkbox" name="block_id" value="${item.id}"><span>${e(item.name)}</span></label>`).join("");
+  const choices=tile.regions.map(item=>option(item.id,item.name)).join("");
+  modal("Plan repair opening",`
+    ${textField("Opening title","title","Repair opening 900 × 600",'required maxlength="90"')}
+    <div class="form-columns">${numField("Template width mm","template_w",900,150,6000,10)}${numField("Template height mm","template_h",600,150,6000,10)}</div>
+    <div class="field"><span>Loose blocks (tick each)</span><div class="divider-list scroll-list">${boxes}</div></div>
+    <div class="form-columns">${selectField("Deepest block","deepest_id",choices)}${selectField("Passage to keep clear","passage_id",choices)}</div>
+    <p class="soft">One template, one window: the long side follows the passage, the passage stays clear, and the deepest block is enclosed where any clear position allows it.</p>
+    <div id="opening-report"></div>`,
+    "Recommend position",async data=>{
+      const body=openingPayload(data);
+      const stamp=dialogToken;
+      const [plan,res]=await Promise.all([
+        api(tileUrl()+"/openings/plan",{method:"POST",body}),
+        request(tileUrl()+"/openings/overlay",{method:"POST",body}),
+      ]);
+      const uri=URL.createObjectURL(await res.blob());
+      if (stamp!==dialogToken){URL.revokeObjectURL(uri);return;}
+      const out=q("#opening-report");
+      if (out.dataset.blob) URL.revokeObjectURL(out.dataset.blob);
+      out.dataset.blob=uri;
+      out.innerHTML=`<figure class="stage">${img(uri,"Recommended repair opening")}</figure>
+        <div class="metrics">${stat("Template",plan.template_mm.map(value=>n(value,0)).join(" × ")+" mm")}${stat("Loose area covered",percent(plan.loose.covered_percent))}${stat("Left outside",n(plan.loose.leftover_mm2,0)+" mm²")}${stat("Deepest enclosed",plan.deepest.enclosed?"Yes":"No")}</div>
+        ${plan.notes.map(note=>`<p class="notice">${e(note)}</p>`).join("")}
+        ${table(["Block","Covered","Status"],plan.loose.blocks.map(item=>[item.name,percent(item.covered_percent),item.status]))}`;
+    },true,btn("Adopt this position","opening-adopt","secondary","check"));
+}
+
 function importEvidence() {
   modal("Verify evidence ZIP",field("Evidence ZIP","packet",'<input id="field-packet" name="packet" type="file" accept="application/zip,.zip" required>')+
     '<p class="soft">Select a PaveDesk inspection archive up to 24 MiB. The viewer checks the declared images against their embedded digests.</p>',
@@ -713,6 +769,16 @@ async function doAction(name,target) {
     "mark-profile":lineForm,
     "trace-add":()=>geometryMeasurementForm("trace"),
     "area-add":()=>geometryMeasurementForm("area"),
+    "opening-add":openingForm,
+    "opening-adopt":async ()=>{
+      const made=await api(tileUrl()+"/openings",{method:"POST",body:openingPayload(formData())});
+      state.tile=made.tile;
+      state.metrologyActive=made.record;
+      await gatherTile();
+      commitModal();
+      toast("Repair opening adopted; the window region and area record are saved.");
+      render();
+    },
     "metrology-open":()=>{state.metrologyActive=state.metrology.find(item=>item.id===id);render();},
     "receive-add":importEvidence,
     "received-open":()=>{state.receivedActive=state.received.find(item=>item.id===id);render();},

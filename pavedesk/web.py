@@ -23,6 +23,7 @@ from .inspection import side_preview, viewing_pair
 from .art import base_rgba
 from .intake import MAX_ARCHIVE_BYTES, inspect_packet
 from .metrology import create_metrology
+from .opening import adopt_opening, plan_opening
 from .model import (
     ANALYSIS_LABELS,
     MAX_UPLOAD,
@@ -425,6 +426,24 @@ def register_desks(api, store, heavy):
         record = store.metrology(entry_id)
         name = filename_stem(record["title"], "geometry")
         return binary_response(artifact_json(record), "application/json", name + ".json")
+
+    @api.post("/specimens/<specimen_id>/openings/plan")
+    def opening_plan(specimen_id):
+        with heavy:
+            plan, _ = plan_opening(store, specimen_id, json_request())
+        return jsonify(plan)
+
+    @api.post("/specimens/<specimen_id>/openings/overlay")
+    def opening_overlay_image(specimen_id):
+        with heavy:
+            _, image = plan_opening(store, specimen_id, json_request())
+        return image_response(image)
+
+    @api.post("/specimens/<specimen_id>/openings")
+    def opening_adopt(specimen_id):
+        with heavy:
+            tile, record = adopt_opening(store, specimen_id, json_request())
+        return jsonify({"tile": present_tile(tile), "record": record}), 201
 
 
 def register_training(api, store, heavy):
