@@ -196,6 +196,7 @@ class Store:
             "plane": fields.get("plane"),
             "registrations": fields.get("registrations", {}),
             "calibration": fields.get("calibration"),
+            "calibrations": fields.get("calibrations", []),
             "synthetic": fields.get("synthetic", False),
         }
         conn.execute(

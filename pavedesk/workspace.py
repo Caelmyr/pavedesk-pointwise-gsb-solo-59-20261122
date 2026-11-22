@@ -1,3 +1,4 @@
+from .calibration import calibration_fields, derive_calibration, present_calibrations
 from .color import robust_neutral
 from .geometry import (
     DEFAULT_CORNERS,
@@ -11,6 +12,7 @@ from .geometry import (
 from .model import (
     ConflictError,
     InputError,
+    MAX_CALIBRATIONS,
     MAX_REGIONS,
     MAX_TILE_IMAGES,
     ROLE_LABELS,
@@ -20,6 +22,7 @@ from .model import (
     identity,
     match_slot,
     model_version,
+    physical_scale,
     region_fields,
     scalar,
     string,
@@ -35,7 +38,6 @@ def describe_photo(photo, plane, registrations):
     info["diagnostics"] = diagnostic_flags(photo)
     is_base = plane is not None and plane["photo_id"] == photo["id"]
     info["registration_state"] = "base" if is_base else "registered" if photo["id"] in registrations else "unregistered"
-    info["preview_url"] = f"/api/captures/{photo['id']}/preview"
     return info
 
 
@@ -54,6 +56,7 @@ def summarize_tile(tile):
         **summary,
         "photo_count": len(photos),
         "region_count": len(tile["regions"]),
+        "calibration_count": len(tile.get("calibrations", [])),
         "cover_url": f"/api/specimens/{tile['id']}/photos/{cover['id']}/thumbnail" if cover else None,
         "registered_count": int(bool(base)) + len(tile["registrations"]),
         "updated_at": tile["updated_at"],
@@ -75,6 +78,7 @@ def present_tile(tile):
     return {
         **tile,
         "photos": photos,
+        "calibrations": present_calibrations(tile),
         "canvas_size": native["size"] if native else None,
     }
 
@@ -146,6 +150,7 @@ def remove_photo(store, tile_id, capture_id, payload):
                 raise ConflictError("Removing the base photo requires resetting its current sampling plane.")
             tile["plane"] = None
             tile["calibration"] = None
+            tile["calibrations"] = []
             tile["registrations"] = {}
             tile["regions"] = []
         tile["registrations"].pop(capture_id, None)
@@ -197,6 +202,7 @@ def save_plane(store, tile_id, payload):
         tile["registrations"].clear()
         tile["regions"].clear()
         tile["calibration"] = None
+        tile["calibrations"] = []
 
     return store.edit_tile(tile_id, expected, change, "plane", "Saved the photographed tile plane")
 
@@ -260,6 +266,51 @@ def remove_region(store, identifier, region_id, payload):
             tile["calibration"] = None
 
     return store.edit_tile(identifier, expected, change, "region", "Removed a live sampling region")
+
+
+def save_calibration(store, identifier, payload, calibration_id=None):
+    expected = model_version(payload)
+    fields = calibration_fields(payload)
+    chosen = identity(calibration_id, "Calibration ID") if calibration_id is not None else make_id()
+    fields["id"] = chosen
+
+    def change(tile):
+        plane = tile.get("plane")
+        if plane is None:
+            raise InputError("Set a base photo before marking old stakes.")
+        if tile.get("width_mm") is None or tile.get("height_mm") is None:
+            raise InputError(
+                "Enter the specimen width and height before using a local distance calibration."
+            )
+        derive_calibration(fields, tuple(plane["size"]), physical_scale(tile, *plane["size"]))
+        records = tile.setdefault("calibrations", [])
+        if calibration_id is None:
+            if len(records) >= MAX_CALIBRATIONS:
+                raise InputError(f"A specimen supports at most {MAX_CALIBRATIONS} local distance calibrations.")
+            records.append(fields)
+        else:
+            previous = match_slot(records, chosen, "local distance calibration")
+            records[records.index(previous)] = fields
+
+    verb = "Saved" if calibration_id is None else "Updated"
+    return store.edit_tile(
+        identifier, expected, change, "calibration",
+        f"{verb} local distance calibration {fields['title']}",
+    )
+
+
+def remove_calibration(store, identifier, calibration_id, payload):
+    expected = model_version(payload)
+    chosen = identity(calibration_id, "Calibration ID")
+
+    def change(tile):
+        records = tile.setdefault("calibrations", [])
+        record = match_slot(records, chosen, "local distance calibration")
+        records.remove(record)
+
+    return store.edit_tile(
+        identifier, expected, change, "calibration", "Removed a local distance calibration",
+    )
 
 
 def calibrate(store, identifier, payload):

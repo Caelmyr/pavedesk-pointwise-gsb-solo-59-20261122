@@ -1,11 +1,19 @@
 import math
 
 import numpy as np
-from PIL import ImageDraw
+from PIL import Image, ImageDraw
 from scipy import ndimage
 
 from .analysis import capture_provenance, specimen_provenance
 from .art import ACCENT, INK, SHADOW, base_rgba, curve_points, stored_preview
+from .calibration import (
+    LOCAL,
+    MIXED,
+    PLANE,
+    applied_calibration,
+    expand_for_stakes,
+    segment_basis,
+)
 from .geometry import active_region, polygon_mask, region_domain, signed_area, specimen_frame, validate_polygon
 from .model import InputError, collection, dictionary, enumeration, identity, numeric_pair, string
 
@@ -15,6 +23,16 @@ MIN_MARK_PIXELS = 20
 REGION_OUTLINE = (199, 212, 151)
 EXCLUDED_OUTLINE = (237, 122, 110)
 MASK_THROUGH = (102, 180, 147, 94)
+BASIS_INK = {
+    PLANE: ACCENT,
+    LOCAL: (126, 214, 176),
+    MIXED: (242, 216, 140),
+}
+BASIS_LABELS = {
+    PLANE: "Plane scale",
+    LOCAL: "Local tape scale",
+    MIXED: "Unassigned",
+}
 
 
 def path_points(payload):
@@ -29,8 +47,17 @@ def calibrated_dimensions(frame):
     return np.array([width, height]), "px"
 
 
-def path_segments(frame, points, closed=False):
+def path_segments(frame, points, closed=False, calibration=None):
     factors, units = calibrated_dimensions(frame)
+    if calibration is not None and closed:
+        raise InputError("A local distance calibration applies to an open trace.")
+    station_bases = None
+    if calibration is not None:
+        points = expand_for_stakes(points, frame.extent, calibration)
+        station_bases = [
+            segment_basis(first, second, frame.extent, calibration)
+            for first, second in zip(points[:-1], points[1:])
+        ]
     point_pixels = np.asarray(points, dtype=np.float64) * frame.extent
     vertices = np.asarray(points, dtype=np.float64) * factors
     if closed:
@@ -45,7 +72,7 @@ def path_segments(frame, points, closed=False):
     segments = []
     for index, (delta, value, pixels) in enumerate(zip(deltas, length, lengths_px)):
         vector = delta.tolist()
-        segments.append({
+        record = {
             "index": index + 1,
             "length": round(float(value), 5),
             "length_px": round(float(pixels), 5),
@@ -53,7 +80,19 @@ def path_segments(frame, points, closed=False):
             "dx": round(vector[0], 5),
             "dy": round(vector[1], 5),
             "clockwise_heading": round(math.degrees(math.atan2(vector[1], vector[0])) % 360, 3),
-        })
+        }
+        if calibration is not None:
+            basis = station_bases[index]
+            local_length = round(float(value * calibration["local_factor"]), 5)
+            adopted = local_length if basis == LOCAL else round(float(value), 5)
+            record.update({
+                "basis": basis,
+                "length": adopted,
+                "local_length": local_length,
+                "plane_length": round(float(value), 5),
+                "local_scale_factor": calibration["local_factor"],
+            })
+        segments.append(record)
     return segments, units
 
 
@@ -178,26 +217,35 @@ def mask_geometry(frame, selected, requested, supported):
     }
 
 
-def geometry_painter(frame, points, segments, closed=False, support=None, centroid=None):
+def geometry_painter(frame, points, segments, closed=False, support=None, centroid=None, stakes=None):
     image = base_rgba(frame)
     width, height = image.size
     pixels = curve_points(points, image.size)
     if support is not None:
         raw = np.asarray(image, dtype=np.float32).copy()
         raw[support, :3] = raw[support, :3] * 0.72 + np.array(MASK_THROUGH[:3], dtype=np.float32) * 0.28
-        from PIL import Image
         image = Image.fromarray(raw.astype(np.uint8))
     draw = ImageDraw.Draw(image)
     edges = [*pixels, pixels[0]] if closed else pixels
     stroke = max(1, round(min(width, height) / 310))
-    draw.line(edges, fill=SHADOW, width=stroke + 3, joint="curve")
-    draw.line(edges, fill=REGION_OUTLINE if closed else ACCENT, width=stroke + 1, joint="curve")
+    if stakes is not None and not closed:
+        for index, (x, y) in enumerate(curve_points(stakes, image.size)):
+            draw.line((x - 9, y, x + 9, y), fill=SHADOW, width=4)
+            draw.line((x, y - 9, x, y + 9), fill=SHADOW, width=4)
+            draw.line((x - 8, y, x + 8, y), fill=INK, width=2)
+            draw.line((x, y - 8, x, y + 8), fill=INK, width=2)
+            draw.text((x + 10, y - 17), "AB"[index], fill=INK, stroke_width=2, stroke_fill=SHADOW)
     for index, (point_a, point_b) in enumerate(zip(edges, edges[1:])):
+        line = segments[index]
+        color = REGION_OUTLINE if closed else BASIS_INK.get(line.get("basis"), ACCENT)
+        draw.line((point_a, point_b), fill=SHADOW, width=stroke + 3)
+        draw.line((point_a, point_b), fill=color, width=stroke + 1)
         x = (point_a[0] + point_b[0]) / 2
         y = (point_a[1] + point_b[1]) / 2
-        line = segments[index]
         label = f"{line['length']:.2f} {line['units']}"
-        draw.text((x + 4, y - 9), label, fill=INK, stroke_width=2, stroke_fill=SHADOW)
+        if line.get("basis") in (LOCAL, MIXED):
+            label += " · local"
+        draw.text((x + 4, y - 9), label, fill=color, stroke_width=2, stroke_fill=SHADOW)
     for index, (x, y) in enumerate(pixels, 1):
         draw.ellipse((x - 4, y - 4, x + 4, y + 4), fill=INK, outline=SHADOW, width=1)
         draw.text((x + 6, y + 3), str(index), fill=INK, stroke_width=2, stroke_fill=SHADOW)
@@ -208,14 +256,23 @@ def geometry_painter(frame, points, segments, closed=False, support=None, centro
     return image
 
 
-def trace_geometry(frame, available, points):
-    segments, units = path_segments(frame, points)
+def basis_totals(segments):
+    totals = {PLANE: 0.0, LOCAL: 0.0, MIXED: 0.0}
+    for segment in segments:
+        totals[segment.get("basis", PLANE)] += segment["length"]
+    return {key: round(float(value), 5) for key, value in totals.items()}
+
+
+def trace_geometry(frame, available, points, calibration=None):
+    segments, units = path_segments(frame, points, calibration=calibration)
+    drawn = expand_for_stakes(points, frame.extent, calibration) if calibration is not None else points
     cumulative = path_cumulative(segments)
     pieces = sample_support_along(available, frame, points)
     samples = sum(item["samples"] for item in pieces)
     present = sum(item["supported_samples"] for item in pieces)
     detail = {
         "points": points,
+        "drawn_points": drawn,
         "segments": segments,
         "trace_length": cumulative[-1],
         "cumulative": cumulative,
@@ -224,7 +281,21 @@ def trace_geometry(frame, available, points):
         "overall_support": round(100 * present / samples, 3),
         "length_unit": units,
     }
-    return detail, geometry_painter(frame, points, segments)
+    if calibration is not None:
+        detail.update({
+            "calibration_id": calibration["id"],
+            "calibration_title": calibration["title"],
+            "calibration_resolution": calibration["resolution"],
+            "local_factor": calibration["local_factor"],
+            "adopted_span_mm": calibration["adopted_span_mm"],
+            "unmatched": calibration["unmatched"],
+            "unmatched_mm": calibration["unmatched_mm"],
+            "basis_totals": basis_totals(segments),
+        })
+    return detail, geometry_painter(
+        frame, drawn, segments,
+        stakes=(calibration["start"], calibration["end"]) if calibration is not None else None,
+    )
 
 
 def polygon_geometry(tile, frame, selection, available):
@@ -251,12 +322,22 @@ def create_metrology(store, specimen_id, payload):
     data = dictionary(payload, "Image measurement")
     title = string(data.get("title"), "Measurement title", maximum=90)
     mode = enumeration(data.get("mode"), ("trace", "area"), "Geometry measurement")
+    calibration_ref = (
+        identity(data.get("calibration_id"), "Calibration ID") if data.get("calibration_id") else None
+    )
+    if calibration_ref and mode != "trace":
+        raise InputError("A local distance calibration applies to traced lengths, not a region area.")
     tile = store.tile(specimen_id)
     frame = specimen_frame(store.blobs, tile)
     available = region_domain(frame.extent, tile) & frame.valid
+    calibration = None
+    if calibration_ref:
+        calibration = applied_calibration(tile, frame, calibration_ref)
+        if calibration.get("invalid"):
+            raise InputError(calibration.get("invalid_reason", "The chosen local distance calibration is not usable."))
     if mode == "trace":
         points = path_points(data.get("points"))
-        shape, overlay = trace_geometry(frame, available, points)
+        shape, overlay = trace_geometry(frame, available, points, calibration)
         region = None
     else:
         region = active_region(tile, identity(data.get("region_id"), "Region ID"))
@@ -269,6 +350,7 @@ def create_metrology(store, specimen_id, payload):
         "source": capture_provenance(frame),
         "region": region,
         "exclusions": [candidate for candidate in tile["regions"] if candidate["purpose"] == "ignore"],
+        "calibration": calibration,
         "shape": shape,
         "image": stored_preview(overlay, store.blobs),
     })

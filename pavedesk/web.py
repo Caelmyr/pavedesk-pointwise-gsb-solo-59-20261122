@@ -21,8 +21,9 @@ from .evidence import (
 )
 from .inspection import side_preview, viewing_pair
 from .art import base_rgba
+from .calibration import RESOLUTION_LABELS, UNMATCHED_LABELS
 from .intake import MAX_ARCHIVE_BYTES, inspect_packet
-from .metrology import create_metrology
+from .metrology import BASIS_LABELS, create_metrology
 from .model import (
     ANALYSIS_LABELS,
     MAX_UPLOAD,
@@ -54,8 +55,10 @@ from .workspace import (
     import_photo,
     present_tile,
     preview_transform,
+    remove_calibration,
     remove_photo,
     remove_region,
+    save_calibration,
     save_plane,
     save_region,
     save_registration,
@@ -232,6 +235,18 @@ def register_specimens(api, store, heavy):
     @api.delete("/specimens/<specimen_id>/calibration")
     def calibration_remove(specimen_id):
         return jsonify(present_tile(clear_calibration(store, specimen_id, json_request())))
+
+    @api.post("/specimens/<specimen_id>/distance-calibrations")
+    def distance_calibration_add(specimen_id):
+        return jsonify(present_tile(save_calibration(store, specimen_id, json_request()))), 201
+
+    @api.put("/specimens/<specimen_id>/distance-calibrations/<calibration_id>")
+    def distance_calibration_change(specimen_id, calibration_id):
+        return jsonify(present_tile(save_calibration(store, specimen_id, json_request(), calibration_id)))
+
+    @api.delete("/specimens/<specimen_id>/distance-calibrations/<calibration_id>")
+    def distance_calibration_remove(specimen_id, calibration_id):
+        return jsonify(present_tile(remove_calibration(store, specimen_id, calibration_id, json_request())))
 
 
 def register_measurements(api, store, heavy):
@@ -469,6 +484,9 @@ def create_app(data_dir=None):
             "photo_roles": ROLE_LABELS,
             "region_purposes": REGION_PURPOSES,
             "analysis_labels": ANALYSIS_LABELS,
+            "calibration_resolutions": RESOLUTION_LABELS,
+            "calibration_unmatched": UNMATCHED_LABELS,
+            "length_basis": BASIS_LABELS,
             "tools": TOOLS,
             "study_metrics": public_metrics(),
         })

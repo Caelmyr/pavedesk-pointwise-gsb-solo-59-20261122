@@ -1,4 +1,4 @@
-import {q,qa,icon,e,btn,link,badge,empty,option,img,field,textField,selectField,numField,checkField,areaField,api,request,date,n,percent,plot,stat,table} from "./widgets.js";
+import {q,qa,icon,e,btn,link,badge,empty,option,img,field,textField,selectField,numField,checkField,areaField,api,request,date,n,percent,plot,stat,table,dots} from "./widgets.js";
 import {resultCard,specimenResultRows} from "./results.js";
 
 const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:""};
@@ -166,28 +166,63 @@ function evidencePage() {
     <section class="card"><h3>Specimen activity</h3><div class="divider-list scroll-list">${(state.activity||[]).map(row=>`<div class="row"><div class="grow"><strong>${e(row.message)}</strong><br><small>${e(date(row.recorded_at))}</small></div></div>`).join("")}</div></section></div>`;
 }
 
+const basisGlyphs={plane:"#f68b60",local:"#7ed6b0",mixed:"#f2d88c"};
+const basisNames=()=>state.config?.length_basis||{plane:"Plane scale",local:"Local tape scale",mixed:"Unassigned"};
+const unmatchedNames=()=>state.config?.calibration_unmatched||{ledger:"Old ledger reading",tape:"New tape reading",both:"Both readings"};
+const resolutionNames=()=>state.config?.calibration_resolutions||{ledger:"Hold the old ledger distance",tape:"Follow the new tape reading",balanced:"Split the difference"};
+
+function calibrationNotice(calibration) {
+  if (!calibration) return "";
+  const parts=[
+    `<p class="notice">Local distance calibration “${e(calibration.title)}” · ${e(resolutionNames()[calibration.resolution]||calibration.resolution)}.</p>`,
+    `<div class="metrics">${stat("Old ledger",`${n(calibration.ledger_mm)} mm`)}${stat("New tape",`${n(calibration.tape_mm)} mm`)}${stat("Adopted span",`${n(calibration.adopted_span_mm)} mm`)}${stat("Local factor",n(calibration.local_factor,5))}</div>`,
+    `<p class="notice">${calibration.unmatched?`Will not match the ${e(unmatchedNames()[calibration.unmatched])} by ${n(calibration.unmatched_mm)} mm.`:"The two readings agree within the recorded tolerance."}</p>`,
+  ];
+  return parts.join("");
+}
+
 function geometryPage() {
   const record=state.metrologyActive;
   const results=state.metrology||[];
-  const tile=state.tile;
   let report=empty("Save a traced path or the area of an existing sampling region.");
   if (record) {
     const metrics=record.shape;
     const base=`/api/metrology/${record.id}`;
+    const calibrated=record.mode==="trace"&&record.calibration;
     const stats=record.mode==="trace"
       ? [["Trace length",`${n(metrics.trace_length)} ${metrics.length_unit}`],["Supported stations",percent(metrics.overall_support)]]
       : [["Marked area",`${n(metrics.vector_outline_area)} ${metrics.units}`],["Visible area",`${n(metrics.raster_supported_area)} ${metrics.units}`],["Outline",`${n(metrics.outline_length)} ${metrics.outline_unit}`]];
     const stations=record.mode==="trace"?metrics.segments:metrics.outline_segments;
+    const columns=calibrated?["Segment","Length","Basis","Plane scale","Local tape scale","Heading"]:["Segment","Length","Heading"];
+    const rows=stations.map(item=>calibrated
+      ? [item.index,`${n(item.length)} ${item.units}`,basisNames()[item.basis]||item.basis,`${n(item.plane_length)} ${item.units}`,`${n(item.local_length)} ${item.units}`,n(item.clockwise_heading)+"°"]
+      : [item.index,`${n(item.length)} ${item.units}`,n(item.clockwise_heading)+"°"]);
+    const legend=calibrated?`<div class="legend"><span>Length basis by segment</span><div class="swatches">${Object.entries(basisNames()).map(([key,label])=>dots(label,basisGlyphs[key])).join(" ")}</div></div>`:"";
+    const totals=metrics.basis_totals?`<p class="soft">Plane basis ${n(metrics.basis_totals.plane)} ${metrics.length_unit} · local basis ${n(metrics.basis_totals.local)} ${metrics.length_unit} · segments crossing both ${n(metrics.basis_totals.mixed)} ${metrics.length_unit}.</p>`:"";
     report=`<section class="card stack"><h3>${e(record.title)}</h3>
       <figure class="stage">${img(base+"/overlay.png",record.title)}</figure>
       <div class="metrics">${stats.map(([name,value])=>stat(name,value)).join("")}</div>
-      ${table(["Segment","Length","Heading"],stations.map(item=>[item.index,`${n(item.length)} ${item.units}`,n(item.clockwise_heading)+"°"]))}
+      ${calibrated?calibrationNotice(record.calibration):""}${legend}${totals}
+      ${table(columns,rows)}
       <div class="actions">${link("Measurement JSON",base+"/data.json","secondary","download")}</div></section>`;
   }
-  return `<div class="grid-detail">${report}<div class="stack"><section class="card"><h3>Measure a visible shape</h3>
+  const calibrationCards=(state.tile.calibrations||[]).map(item=>{
+    const invalid=item.invalid;
+    const summary=invalid
+      ? `<small class="soft">Not usable: ${e(item.invalid_reason||"plane is unavailable")}</small>`
+      : `<small class="soft">Ledger ${n(item.ledger_mm)} mm · tape ${n(item.tape_mm)} mm · ${e(resolutionNames()[item.resolution]||item.resolution)} · leaves ${e(unmatchedNames()[item.unmatched]||"neither reading")} unmatched by ${n(item.unmatched_mm)} mm</small>`;
+    return `<div class="row"><div class="grow">${e(item.title)}<br>${summary}</div>
+      ${badge(item.unmatched?"Conflict recorded":"Readings agree",item.unmatched?"caution":"ready")}
+      ${btn("Edit","calibration-edit","tiny secondary",null,`data-id="${item.id}"`)}${btn("Remove","calibration-remove","tiny ghost",null,`data-id="${item.id}"`)}</div>`;
+  }).join("");
+  return `<div class="grid-detail">${report}<div class="stack">
+      <section class="card"><h3>Measure a visible shape</h3>
       <p class="soft">Trace along the image or measure visible support inside a saved sampling region.</p>
       <div class="actions">${btn("Trace a path","trace-add","primary","measure")}${btn("Measure region area","area-add","secondary","frame")}</div></section>
-      <section class="card"><h3>Saved geometry</h3><div class="divider-list">${results.map(item=>`<div class="row"><div class="grow">${e(item.title)}<br><small>${e(item.mode)} · revision ${item.specimen.version}</small></div>${btn("Open","metrology-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")||"<p class='soft'>No saved outlines.</p>"}</div></section></div></div>`;
+      <section class="card"><div class="title-row"><h3>Local distance calibration</h3>${btn("Mark stakes","calibration-add","secondary","frame")}</div>
+      <p class="soft">Record the old ledger distance and the new pasted tape between two stakes. The correction applies only to traced lengths between those stakes; the specimen plane scale is unchanged.</p>
+      <div class="divider-list">${calibrationCards||"<p class='soft'>No local distance calibration on this specimen.</p>"}</div></section>
+      <section class="card"><h3>Saved geometry</h3><div class="divider-list">${results.map(item=>`<div class="row"><div class="grow">${e(item.title)}<br><small>${e(item.mode)} · revision ${item.specimen.version}${item.calibration?" · local calibration":""}</small></div>${btn("Open","metrology-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")||"<p class='soft'>No saved outlines.</p>"}</div></section></div></div>`;
 }
 
 function receivedPage() {
@@ -513,6 +548,36 @@ function pairForm() {
     },true);
 }
 
+function calibrationChoices() {
+  const rows=(state.tile.calibrations||[]).filter(item=>!item.invalid);
+  return option("","Specimen plane scale","")+rows.map(item=>option(item.id,`${item.title} · ${resolutionNames()[item.resolution]||item.resolution}`)).join("");
+}
+
+function calibrationForm(existing) {
+  const base=state.tile.photos.find(item=>item.registration_state==="base");
+  if (!base) throw Error("Set a base photo before marking old stakes.");
+  if (state.tile.width_mm==null||state.tile.height_mm==null) throw Error("Enter the specimen width and height before using a local distance calibration.");
+  const value=existing||{};
+  const chosen=value.resolution||"balanced";
+  modal(existing?"Edit local distance calibration":"Local distance calibration",
+    `<p class="notice">Mark the two old stakes along the slope, then copy both distances. The plane scale stays as it is; only traced lengths between the stakes use the local factor.</p>
+    ${drawing(base.registered_url,"Specimen plane for stake placement")}
+    <div class="actions">${btn("Clear points","draw-clear","tiny secondary")}${btn("Undo point","draw-undo","tiny ghost")}<span class="soft" id="draw-count"></span></div>
+    <div class="form-columns">${textField("Title","title",value.title||"Stake span",'required maxlength="90"')}
+    ${numField("Old ledger distance (mm)","ledger_mm",value.ledger_mm??"",0.01,100000,0.1)}
+    ${numField("New tape distance (mm)","tape_mm",value.tape_mm??"",0.01,100000,0.1)}</div>
+    ${textField("Ledger reference","ledger_source",value.ledger_source||"",'maxlength="200"')}
+    ${textField("Tape reference","tape_source",value.tape_source||"",'maxlength="200"')}
+    ${selectField("Resolution","resolution",Object.entries(resolutionNames()).map(([key,label])=>option(key,label,chosen)).join(""))}
+    <p class="soft">When the readings disagree, the chosen resolution names the reading it will not match.</p>`,
+    existing?"Save calibration":"Save calibration",async data=>{
+      if (drawPoints.length!==2) throw Error("Mark exactly the two old stakes.");
+      const payload={...plainData(data),start:drawPoints[0],end:drawPoints[1],ledger_mm:Number(data.get("ledger_mm")),tape_mm:Number(data.get("tape_mm"))};
+      await patchTile(existing?"/distance-calibrations/"+existing.id:"/distance-calibrations",existing?"PUT":"POST",payload,"Local distance calibration saved.");
+    },true);
+  prepareDrawing(existing?[existing.start,existing.end]:[],2);
+}
+
 function geometryMeasurementForm(mode) {
   const base=state.tile.photos.find(item=>item.registration_state==="base");
   if (!base) throw Error("Set a base photo before measuring its geometry.");
@@ -522,10 +587,11 @@ function geometryMeasurementForm(mode) {
   const content=area?selectField("Region","region_id",regions(null,false)):`
     <p class="notice">Click along the shape you want to trace. The line reports measured lengths along the registered surface.</p>
     ${drawing(base.registered_url,"Specimen outline for tracing")}
-    <div class="actions">${btn("Clear points","draw-clear","tiny secondary")}${btn("Undo point","draw-undo","tiny ghost")}<span class="soft" id="draw-count"></span></div>`;
+    <div class="actions">${btn("Clear points","draw-clear","tiny secondary")}${btn("Undo point","draw-undo","tiny ghost")}<span class="soft" id="draw-count"></span></div>
+    ${selectField("Distance basis","calibration_id",calibrationChoices())}`;
   modal(title,textField("Measurement title","title",area?"Region area":"Surface trace",'required maxlength="90"')+content,
     "Save geometry",async data=>{
-      const payload={title:data.get("title"),mode,region_id:data.get("region_id"),points:drawPoints};
+      const payload={title:data.get("title"),mode,region_id:data.get("region_id"),points:drawPoints,calibration_id:data.get("calibration_id")||null};
       state.metrologyActive=await api(tileUrl()+"/metrology",{method:"POST",body:payload});
       await gatherTile();
       commitModal();
@@ -713,6 +779,11 @@ async function doAction(name,target) {
     "mark-profile":lineForm,
     "trace-add":()=>geometryMeasurementForm("trace"),
     "area-add":()=>geometryMeasurementForm("area"),
+    "calibration-add":()=>calibrationForm(),
+    "calibration-edit":()=>calibrationForm((state.tile.calibrations||[]).find(item=>item.id===id)),
+    "calibration-remove":()=>modal("Remove local distance calibration?",'<p>Saved geometry measurements keep the calibration and both readings they used.</p>',"Remove calibration",async ()=>{
+      await patchTile("/distance-calibrations/"+id,"DELETE",{},"Local distance calibration removed.");
+    }),
     "metrology-open":()=>{state.metrologyActive=state.metrology.find(item=>item.id===id);render();},
     "receive-add":importEvidence,
     "received-open":()=>{state.receivedActive=state.received.find(item=>item.id===id);render();},
