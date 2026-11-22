@@ -7,6 +7,7 @@ from flask import Blueprint, Flask, Response, jsonify, request, send_file, send_
 from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 
 from .analysis import approve_reference, evaluate
+from .coring import confirm_plan, plan_cores
 from .demo import load_training, preview_photo
 from .evidence import (
     artifact_json,
@@ -354,6 +355,10 @@ def register_artifacts(api, store, heavy):
     def study_history():
         return jsonify({"items": store.studies()})
 
+    @api.get("/studies/<study_id>")
+    def study_show(study_id):
+        return jsonify(store.study(study_id))
+
     @api.post("/studies")
     def study_make():
         with heavy:
@@ -425,6 +430,32 @@ def register_desks(api, store, heavy):
         record = store.metrology(entry_id)
         name = filename_stem(record["title"], "geometry")
         return binary_response(artifact_json(record), "application/json", name + ".json")
+
+
+def register_coring(api, store, heavy):
+    @api.get("/specimens/<specimen_id>/core-plans")
+    def core_plans(specimen_id):
+        return jsonify({"items": store.list_core_plans(specimen_id)})
+
+    @api.post("/specimens/<specimen_id>/core-plans")
+    def core_plan_make(specimen_id):
+        with heavy:
+            plan = plan_cores(store, specimen_id, json_request())
+        return jsonify(plan), 201
+
+    @api.get("/core-plans/<plan_id>")
+    def core_plan_show(plan_id):
+        return jsonify(store.core_plan(plan_id))
+
+    @api.get("/core-plans/<plan_id>/overlay.png")
+    def core_plan_image(plan_id):
+        return png_blob(store, store.core_plan(plan_id)["overlay"])
+
+    @api.post("/core-plans/<plan_id>/confirm")
+    def core_plan_confirm(plan_id):
+        with heavy:
+            plan = confirm_plan(store, plan_id, json_request())
+        return jsonify(plan)
 
 
 def register_training(api, store, heavy):
@@ -507,5 +538,6 @@ def create_app(data_dir=None):
     register_measurements(api, store, heavy)
     register_artifacts(api, store, heavy)
     register_desks(api, store, heavy)
+    register_coring(api, store, heavy)
     app.register_blueprint(api)
     return app

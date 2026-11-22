@@ -114,7 +114,7 @@ def quality_cell(frame, support, detail, bounds):
         "bounds": [left / width, top / height, right / width, bottom / height],
         "supported": count,
         "supported_percent": round(100 * count / pixels.size, 2),
-        "clipped_percent": round(100 * np.count_nonzero(clip) / count, 2),
+        "clipped_percent": round(100 * float(np.count_nonzero(clip)) / count, 2),
         "detail_quantiles": quantile_rows(solid, (0.20, 0.50, 0.90), 6),
     }
 

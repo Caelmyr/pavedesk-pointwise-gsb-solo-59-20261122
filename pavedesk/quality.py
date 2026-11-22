@@ -123,7 +123,7 @@ def channel_statistics(rgb, support):
         return {"rgb_quantiles": None, "per_channel_highlight_clip": None}
     return {
         "rgb_quantiles": [quantile_rows(plane, (0.01, 0.25, 0.50, 0.75, 0.99), 5) for plane in supported.T],
-        "per_channel_highlight_clip": [round(100 * np.mean(channel >= MAX_PHOTO_CODE), 3) for channel in supported.T],
+        "per_channel_highlight_clip": [round(float(100 * np.mean(channel >= MAX_PHOTO_CODE)), 3) for channel in supported.T],
     }
 
 

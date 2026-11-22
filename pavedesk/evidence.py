@@ -108,8 +108,8 @@ def result_metrics_table(record):
 
 
 def study_table(report):
-    columns = ("tile_name", "tile_id", "group", "measurement_id", "version", "value", "support")
-    return csv_lines(columns, ([item[key] for key in columns] for item in report["rows"]))
+    columns = ("tile_name", "tile_id", "sample", "group", "measurement_id", "version", "value", "support")
+    return csv_lines(columns, ([item.get(key) for key in columns] for item in report["rows"]))
 
 
 def source_index(tile, results):

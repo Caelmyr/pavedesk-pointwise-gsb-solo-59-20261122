@@ -2,7 +2,7 @@ from collections import defaultdict
 import math
 
 from .art import comparison_sheet, load_artifact_picture, stored_preview
-from .model import InputError, dictionary, enumeration, string, unique_ids
+from .model import InputError, dictionary, enumeration, identity, string, unique_ids
 
 
 STUDY_CHOICES = {
@@ -59,16 +59,18 @@ def capture_note(differences):
     return "Groups mix " + ", ".join(differences) + ". Use comparisons as descriptive image observations."
 
 
-def trial_entry(record, selector, group_by):
+def trial_entry(record, selector, group_by, labels=None):
     source = record["provenance"]["specimen"]
     value = selector(record)
     if value is None or not math.isfinite(value):
         raise InputError("One selected run does not have a numeric value for this comparison.")
+    region = record["provenance"].get("region")
     return {
         "measurement_id": record["id"],
         "tile_id": source["id"],
         "tile_name": source["name"],
-        "group": group_label(record, group_by),
+        "sample": region["name"] if region else None,
+        "group": labels[record["id"]] if labels else group_label(record, group_by),
         "version": source["version"],
         "value": round(float(value), 6),
         "capture": record["provenance"]["photo"],
@@ -127,9 +129,10 @@ def sheets_for_study(blobs, title, entries, unit):
         cards = []
         for item in group:
             source = load_artifact_picture(blobs, item["overlay"])
+            heading = item["tile_name"] + (f" · {item['sample']}" if item.get("sample") else "")
             cards.append({
                 "image": source,
-                "heading": item["tile_name"],
+                "heading": heading,
                 "description": f"{item['group']} · {item['value']:.3f} · {unit}",
             })
         label = title if len(entries) <= 9 else f"{title} · {offset + 1}–{offset + len(cards)}"
@@ -137,27 +140,37 @@ def sheets_for_study(blobs, title, entries, unit):
     return digests
 
 
+def group_labels(value, identifiers):
+    if value is None:
+        return None
+    mapping = dictionary(value, "Group labels")
+    if set(mapping) != set(identifiers):
+        raise InputError("Give a group label for every selected measurement.")
+    return {identity(key, "Measurement ID"): string(item, "Group label", maximum=80) for key, item in mapping.items()}
+
+
 def create_study(store, payload):
     data = dictionary(payload, "Firing comparison")
     title = string(data.get("title"), "Study title", maximum=100)
     group_by = enumeration(data.get("group_by", "firing"), ("firing", "body", "glaze", "batch"), "Group by")
     identifiers = unique_ids(data.get("result_ids"), "Measurements", minimum=2, maximum=18)
+    labels = group_labels(data.get("group_labels"), identifiers)
     records = [store.result(result_id) for result_id in identifiers]
     kind = records[0]["kind"]
     if kind not in STUDY_CHOICES or any(record["kind"] != kind for record in records):
         raise InputError("Select 2 to 18 runs of the same supported measurement type.")
-    if len({record["tile_id"] for record in records}) != len(records):
+    if labels is None and len({record["tile_id"] for record in records}) != len(records):
         raise InputError("Select one measurement per specimen for a firing comparison.")
     option = enumeration(data.get("metric"), STUDY_CHOICES[kind], "Metric")
     unit, reducer = STUDY_CHOICES[kind][option]
     signatures = [comparable_signature(record) for record in records]
     differences = sorted(key.replace("_", " ") for key in signatures[0] if len({item[key] for item in signatures}) > 1)
     entries = sorted(
-        [trial_entry(record, reducer, group_by) for record in records],
+        [trial_entry(record, reducer, group_by, labels) for record in records],
         key=lambda item: (item["group"].casefold(), item["tile_name"].casefold(), item["measurement_id"]),
     )
     sampling, caveats = assess_sampling_groups(entries, group_by)
-    return store.save_study({
+    report = {
         "title": title,
         "kind": kind,
         "metric": option,
@@ -169,7 +182,10 @@ def create_study(store, payload):
         "comparison_note": capture_note(differences),
         "caveats": caveats,
         "pictures": sheets_for_study(store.blobs, title, entries, unit),
-    })
+    }
+    if labels is not None:
+        report["group_labels"] = labels
+    return store.save_study(report)
 
 
 def public_metrics():

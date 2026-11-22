@@ -1,7 +1,7 @@
 import {q,qa,icon,e,btn,link,badge,empty,option,img,field,textField,selectField,numField,checkField,areaField,api,request,date,n,percent,plot,stat,table} from "./widgets.js";
 import {resultCard,specimenResultRows} from "./results.js";
 
-const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:""};
+const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],plans:[],plan:null,query:""};
 const dialog=q("#dialog");
 const nav=[
   ["collection","Specimens","tiles"],
@@ -10,7 +10,7 @@ const nav=[
   ["received","Received evidence","archive"],
 ];
 const tabs=[
-  ["captures","Captures","camera"],["regions","Sampling regions","frame"],["measure","Measure","measure"],["geometry","Geometry","frame"],["evidence","Evidence","archive"],
+  ["captures","Captures","camera"],["regions","Sampling regions","frame"],["measure","Measure","measure"],["geometry","Geometry","frame"],["coring","Coring","sample"],["evidence","Evidence","archive"],
 ];
 const tileUrl=()=>`/api/specimens/${state.tile.id}`;
 const tileData=extra=>({version:state.tile.version,...extra});
@@ -190,6 +190,36 @@ function geometryPage() {
       <section class="card"><h3>Saved geometry</h3><div class="divider-list">${results.map(item=>`<div class="row"><div class="grow">${e(item.title)}<br><small>${e(item.mode)} · revision ${item.specimen.version}</small></div>${btn("Open","metrology-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")||"<p class='soft'>No saved outlines.</p>"}</div></section></div></div>`;
 }
 
+function coringPage() {
+  const plan=state.plan;
+  const defects=state.results.filter(item=>item.kind==="defects");
+  const kinds=["color","texture","coverage","glare"];
+  let view=empty("Mark material zones, confirm defect observations, then compute a core plan.");
+  if (plan) {
+    const unmet=[
+      ...plan.unmet.distresses.map(item=>`${item.key} not cored — ${item.reason}.`),
+      ...plan.unmet.materials.map(label=>`Material not sampled — ${label}.`),
+    ];
+    view=`<section class="card stack"><div class="title-row"><h3>${n(plan.diameter_mm,0)} mm core plan</h3>${badge(plan.status,plan.status==="confirmed"?"ready":"caution")}</div>
+      <figure class="stage">${img(`/api/core-plans/${plan.id}/overlay.png?v=${plan.version}`,"Planned core positions on the corrected photo")}</figure>
+      ${table(["Core","Material","Covers","Clearance","Support"],plan.circles.map(item=>[item.key,item.material,item.covers.join(", ")||"—",`${n(item.clearance_mm,1)} mm`,percent(item.support_percent)]))}
+      ${unmet.map(item=>`<p class="notice">${e(item)}</p>`).join("")}
+      ${plan.status==="proposed"?`<h3>Confirm and measure</h3>
+        <div class="form-columns">${kinds.map(kind=>checkField(state.config.analysis_labels[kind],"kind-"+kind,["color","texture"].includes(kind))).join("")}</div>
+        <p class="soft">Confirming saves the circles as sampling regions, measures each one, and builds survey comparisons grouped by material.</p>
+        <div class="actions">${btn("Confirm cores & build comparisons","plan-confirm","primary","check")}</div>`
+      :`<div class="actions">${(plan.outcome?.study_ids||[]).map(id=>btn("Open survey comparison","plan-study","secondary","plot",`data-id="${id}"`)).join("")}</div>`}
+    </section>`;
+  }
+  const form=`<section class="card"><h3>Plan drill cores</h3>
+    ${defects.length?`<div class="field"><label for="core-measurement">Defects measurement</label><select id="core-measurement">${defects.map(item=>option(item.id,`r${item.source_version} · ${date(item.created_at)} · ${item.brief.reported_observations} observations`)).join("")}</select></div>
+    <div class="form-columns">${numField("Core diameter mm","core-diameter",100,20,600,5)}${numField("Cores","core-count",2,1,4,1)}</div>
+    <div class="actions">${btn("Compute core plan","coring-compute","primary","measure")}</div>`
+    :"<p class='soft'>Run a visible-defects measurement and confirm its observations first.</p>"}</section>`;
+  const list=`<section class="card"><h3>Saved core plans</h3><div class="divider-list">${state.plans.map(item=>`<div class="row"><div class="grow"><strong>${n(item.diameter_mm,0)} mm · ${e(item.status)}</strong><br><small>${e(date(item.created_at))} · ${item.circles.map(circle=>circle.material).join(" + ")}</small></div>${btn("Open","plan-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")||"<p class='soft'>No core plans yet.</p>"}</div></section>`;
+  return `<div class="grid-detail">${view}<div class="stack">${form}${list}</div></div>`;
+}
+
 function receivedPage() {
   const items=state.received||[];
   const chosen=state.receivedActive;
@@ -215,7 +245,7 @@ function tilePage() {
   <p>${e(descriptors.join(" · ") || "Registered pavement survey")}</p></div><div class="actions">${btn("Edit specimen","tile-edit","secondary","edit")}
   ${btn("Approve reference","reference-add","secondary","book")}</div></header>
   <nav class="tabs" aria-label="Specimen tools">${tabs.map(([key,label,glyph])=>`<button type="button" class="tab ${state.tab===key?"active":""}" data-do="tile-tab" data-value="${key}">${icon(glyph)}${e(label)}</button>`).join("")}</nav>
-  ${{captures,regions:regionPage,measure:measurements,geometry:geometryPage,evidence:evidencePage}[state.tab]()}`;
+  ${{captures,regions:regionPage,measure:measurements,geometry:geometryPage,coring:coringPage,evidence:evidencePage}[state.tab]()}`;
 }
 
 function libraryPage() {
@@ -233,7 +263,7 @@ function studyPanel() {
   return `<section class="card stack"><h3>${e(report.title)}</h3><p>${e(report.comparison_note)}</p>
     <div class="metrics">${report.groups.map(item=>stat(`${item.group} · n=${item.n}`,n(item.mean,4))).join("")}</div>
     ${report.pictures.map((_,index)=>img(base+`/sheet/${index+1}`,`Survey comparison sheet ${index+1}`)).join("")}
-    ${table(["Specimen","Group",report.metric_label,"Support"],report.rows.map(item=>[item.tile_name,item.group,n(item.value,4),percent(item.support)]))}
+    ${table(["Specimen","Sample","Group",report.metric_label,"Support"],report.rows.map(item=>[item.tile_name,item.sample,item.group,n(item.value,4),percent(item.support)]))}
     ${report.caveats.map(item=>`<p class="notice">${e(item)}</p>`).join("")}<div class="actions">${link("CSV",base+"/data.csv","secondary","download")}${link("Study JSON",base+"/data.json","secondary","download")}</div></section>`;
 }
 
@@ -250,8 +280,8 @@ function render() {
 
 async function gatherTile(token=travel) {
   const url=tileUrl();
-  const [results,packets,activity,refs,metrology]=await Promise.all([
-    api(url+"/results"),api(url+"/evidence"),api(url+"/activity"),api("/api/library"),api(url+"/metrology"),
+  const [results,packets,activity,refs,metrology,plans]=await Promise.all([
+    api(url+"/results"),api(url+"/evidence"),api(url+"/activity"),api("/api/library"),api(url+"/metrology"),api(url+"/core-plans"),
   ]);
   if (token!==travel) return;
   state.results=results.items;
@@ -259,6 +289,7 @@ async function gatherTile(token=travel) {
   state.activity=activity.items;
   state.metrology=metrology.items;
   state.refs=refs.items;
+  state.plans=plans.items;
 }
 
 async function route() {
@@ -270,7 +301,7 @@ async function route() {
     const tile=await api(`/api/specimens/${id}`);
     if (token!==travel) return;
     if (state.tile?.id!==tile.id || state.page!=="tile") {
-      state.tab="captures"; state.capture=null; state.result=null;state.layer="overlay";state.viewer="raw";state.metrologyActive=null;
+      state.tab="captures"; state.capture=null; state.result=null;state.layer="overlay";state.viewer="raw";state.metrologyActive=null;state.plan=null;
     }
     state.tile=tile;
     await gatherTile(token);
@@ -711,6 +742,28 @@ async function doAction(name,target) {
       });
     },
     "mark-profile":lineForm,
+    "coring-compute":async ()=>{
+      const measurement=q("#core-measurement")?.value;
+      if (!measurement) throw Error("Run and confirm a defects measurement first.");
+      state.plan=await api(tileUrl()+"/core-plans",{method:"POST",body:{
+        measurement_id:measurement,
+        diameter_mm:Number(q("#field-core-diameter").value)||100,
+        cores:Number(q("#field-core-count").value)||2,
+      }});
+      await gatherTile();
+      toast("Core plan computed.");
+      render();
+    },
+    "plan-open":async ()=>{state.plan=await api("/api/core-plans/"+id);render();},
+    "plan-confirm":async ()=>{
+      const kinds=["color","texture","coverage","glare"].filter(kind=>q(`input[name="kind-${kind}"]`)?.checked);
+      if (!kinds.length) throw Error("Choose at least one measurement kind.");
+      state.plan=await api(`/api/core-plans/${state.plan.id}/confirm`,{method:"POST",body:{version:state.plan.version,kinds}});
+      await gatherTile();
+      toast("Cores confirmed; survey comparisons built.");
+      render();
+    },
+    "plan-study":async ()=>{state.study=await api("/api/studies/"+id);location.hash="studies";},
     "trace-add":()=>geometryMeasurementForm("trace"),
     "area-add":()=>geometryMeasurementForm("area"),
     "metrology-open":()=>{state.metrologyActive=state.metrology.find(item=>item.id===id);render();},

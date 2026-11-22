@@ -36,6 +36,7 @@ REGION_PURPOSES = {
     "bare": "Bare pavement sample",
     "glazed": "Observed marking sample",
     "neutral": "Neutral color card",
+    "material": "Material zone",
     "ignore": "Exclude from measurement",
 }
 ANALYSIS_LABELS = {

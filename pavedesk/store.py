@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS metrology (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS metrology_tile ON metrology(tile_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS core_plans (
+    id TEXT PRIMARY KEY,
+    tile_id TEXT NOT NULL REFERENCES specimens(id),
+    document TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS core_plans_tile ON core_plans(tile_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -474,3 +481,41 @@ class Store:
                 "SELECT document FROM metrology WHERE tile_id=? ORDER BY rowid DESC LIMIT 50", (chosen,),
             ).fetchall()
             return [json.loads(row["document"]) for row in rows]
+
+    def save_core_plan(self, fields):
+        plan = {**fields, "id": make_id(), "version": 1, "created_at": timestamp()}
+        with self.transaction(write=True) as conn:
+            conn.execute(
+                "INSERT INTO core_plans(id,tile_id,document,created_at) VALUES (?,?,?,?)",
+                (plan["id"], plan["tile_id"], document(plan), plan["created_at"]),
+            )
+            event(conn, plan["tile_id"], "coring", f"Planned {len(plan['circles'])} drill core position(s)")
+        return plan
+
+    def _core_plan(self, conn, identifier):
+        chosen = identity(identifier, "Core plan ID")
+        row = conn.execute("SELECT document FROM core_plans WHERE id=?", (chosen,)).fetchone()
+        return artifact_row(row, "Core plan")
+
+    def core_plan(self, identifier):
+        with self.connect() as conn:
+            return self._core_plan(conn, identifier)
+
+    def list_core_plans(self, tile_id):
+        chosen = identity(tile_id, "Specimen ID")
+        with self.connect() as conn:
+            self._tile(conn, chosen)
+            rows = conn.execute(
+                "SELECT document FROM core_plans WHERE tile_id=? ORDER BY rowid DESC LIMIT 30", (chosen,),
+            ).fetchall()
+            return [json.loads(row["document"]) for row in rows]
+
+    def update_core_plan(self, identifier, expected_version, transform, message):
+        with self.transaction(write=True) as conn:
+            plan = self._core_plan(conn, identifier)
+            self.require_version(plan, expected_version)
+            transform(plan)
+            plan["version"] += 1
+            conn.execute("UPDATE core_plans SET document=? WHERE id=?", (document(plan), plan["id"]))
+            event(conn, plan["tile_id"], "coring", message)
+            return plan
